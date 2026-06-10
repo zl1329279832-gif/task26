@@ -189,5 +189,65 @@ class ConsumerIdempotencyTest {
         DowntimeEventConsumer downtimeConsumer = new DowntimeEventConsumer(downtimeService);
         assertTrue(downtimeConsumer.supportsEventType("DOWNTIME_FORCE_END"));
         assertFalse(downtimeConsumer.supportsEventType("FAULT_REPORTED"));
+
+        PredictiveDispatchConsumer predictiveConsumer = new PredictiveDispatchConsumer(wsHandler, auditService);
+        assertTrue(predictiveConsumer.supportsEventType("DISPATCH_PLANS_GENERATED"));
+        assertTrue(predictiveConsumer.supportsEventType("PARTS_PRE_OCCUPIED"));
+        assertTrue(predictiveConsumer.supportsEventType("PARTS_PRE_RELEASED"));
+        assertTrue(predictiveConsumer.supportsEventType("PURCHASE_SUGGESTED"));
+        assertTrue(predictiveConsumer.supportsEventType("SLA_PAUSED"));
+        assertTrue(predictiveConsumer.supportsEventType("SLA_RESUMED"));
+        assertFalse(predictiveConsumer.supportsEventType("DISPATCH_DONE"));
+    }
+
+    // ========================================================
+    // TEST: PredictiveDispatchConsumer - duplicate events are skipped
+    // ========================================================
+    @Test
+    @DisplayName("PredictiveDispatchConsumer must skip duplicate events")
+    void predictiveConsumer_skipsDuplicateEvents() {
+        PredictiveDispatchConsumer consumer = new PredictiveDispatchConsumer(wsHandler, auditService);
+
+        MaintenanceEvent event = new MaintenanceEvent();
+        event.setEventId("predictive-dup-001");
+        event.setEventType("DISPATCH_PLANS_GENERATED");
+        event.setPayload("{\"workOrderId\":1,\"faultId\":1,\"planCount\":3,\"recommendedPlanIndex\":1}");
+
+        consumer.handleEvent(event);
+        consumer.handleEvent(event); // duplicate
+
+        // Broadcast should only happen once
+        verify(wsHandler, times(1)).broadcast(eq("DISPATCH_PLANS"), any());
+    }
+
+    @Test
+    @DisplayName("PredictiveDispatchConsumer handles SLA_PAUSED event")
+    void predictiveConsumer_handlesSlaPaused() {
+        PredictiveDispatchConsumer consumer = new PredictiveDispatchConsumer(wsHandler, auditService);
+
+        MaintenanceEvent event = new MaintenanceEvent();
+        event.setEventId("sla-paused-001");
+        event.setEventType("SLA_PAUSED");
+        event.setPayload("{\"workOrderId\":1,\"remainingMinutes\":60,\"reason\":\"waiting for parts\"}");
+
+        consumer.handleEvent(event);
+
+        verify(wsHandler).broadcast(eq("SLA_WARNING"), any());
+    }
+
+    @Test
+    @DisplayName("PredictiveDispatchConsumer handles PURCHASE_SUGGESTED event")
+    void predictiveConsumer_handlesPurchaseSuggested() {
+        PredictiveDispatchConsumer consumer = new PredictiveDispatchConsumer(wsHandler, auditService);
+
+        MaintenanceEvent event = new MaintenanceEvent();
+        event.setEventId("purchase-001");
+        event.setEventType("PURCHASE_SUGGESTED");
+        event.setPayload("{\"workOrderId\":1,\"partId\":10,\"partCode\":\"P001\",\"partName\":\"Bearing\",\"shortage\":2,\"urgency\":\"URGENT\"}");
+
+        consumer.handleEvent(event);
+
+        verify(wsHandler).broadcast(eq("PURCHASE_SUGGESTION"), any());
+        verify(auditService).log(eq("PURCHASE"), eq("SUGGESTION"), eq("WorkOrder"), eq(1L), eq("SYSTEM"), anyString());
     }
 }

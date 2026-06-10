@@ -169,3 +169,63 @@ CREATE TABLE IF NOT EXISTS audit_log (
     INDEX idx_target (target_type, target_id),
     INDEX idx_created (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='审计日志表';
+
+-- 派工方案表
+CREATE TABLE IF NOT EXISTS dispatch_plan (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    work_order_id BIGINT NOT NULL COMMENT '工单ID',
+    fault_id BIGINT NOT NULL COMMENT '故障ID',
+    plan_index INT NOT NULL COMMENT '方案排名(1=最优)',
+    technician_id BIGINT NOT NULL COMMENT '维修人员ID',
+    total_score DECIMAL(8,2) COMMENT '总分',
+    skill_score DECIMAL(5,2) COMMENT '技能匹配分',
+    cert_score DECIMAL(5,2) COMMENT '认证分',
+    availability_score DECIMAL(5,2) COMMENT '可用性分',
+    workload_score DECIMAL(5,2) COMMENT '负载分',
+    performance_score DECIMAL(5,2) COMMENT '历史绩效分',
+    history_score DECIMAL(5,2) COMMENT '设备故障历史分',
+    sla_score DECIMAL(5,2) COMMENT 'SLA剩余时间分',
+    estimated_downtime_loss DECIMAL(12,2) COMMENT '预计停机损失',
+    recommendation_reason TEXT COMMENT '推荐理由',
+    is_recommended TINYINT DEFAULT 0 COMMENT '是否推荐',
+    is_selected TINYINT DEFAULT 0 COMMENT '是否已选中',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_order (work_order_id),
+    INDEX idx_fault (fault_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='派工方案表';
+
+-- 采购建议表
+CREATE TABLE IF NOT EXISTS purchase_suggestion (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    work_order_id BIGINT NOT NULL COMMENT '工单ID',
+    part_id BIGINT NOT NULL COMMENT '备件ID',
+    part_code VARCHAR(50) COMMENT '备件编码',
+    part_name VARCHAR(100) COMMENT '备件名称',
+    required_quantity INT NOT NULL COMMENT '需求数量',
+    current_stock INT NOT NULL COMMENT '当前库存',
+    shortage_quantity INT NOT NULL COMMENT '缺口数量',
+    unit_price DECIMAL(10,2) COMMENT '单价',
+    estimated_cost DECIMAL(12,2) COMMENT '预估费用',
+    urgency VARCHAR(20) DEFAULT 'NORMAL' COMMENT '紧急程度: NORMAL/URGENT/CRITICAL',
+    status VARCHAR(20) DEFAULT 'PENDING' COMMENT '状态: PENDING/APPROVED/PURCHASED',
+    sla_paused TINYINT DEFAULT 0 COMMENT '是否暂停SLA',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_order (work_order_id),
+    INDEX idx_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='采购建议表';
+
+-- SLA记录表
+CREATE TABLE IF NOT EXISTS sla_record (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    work_order_id BIGINT NOT NULL COMMENT '工单ID',
+    fault_level INT NOT NULL COMMENT '故障等级',
+    sla_deadline DATETIME NOT NULL COMMENT 'SLA截止时间',
+    remaining_minutes INT COMMENT '剩余分钟数(暂停时更新)',
+    status VARCHAR(20) DEFAULT 'ACTIVE' COMMENT '状态: ACTIVE/PAUSED/EXPIRED/MET',
+    pause_reason VARCHAR(200) COMMENT '暂停原因',
+    paused_at DATETIME COMMENT '暂停时间',
+    resumed_at DATETIME COMMENT '恢复时间',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_order (work_order_id),
+    INDEX idx_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='SLA记录表';

@@ -20,6 +20,7 @@ import com.maintenance.mapper.EquipmentMapper;
 import com.maintenance.mapper.FaultMapper;
 import com.maintenance.mapper.WorkOrderMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -47,6 +48,8 @@ public class WorkOrderService {
     private final DowntimeService downtimeService;
     private final LocalMessageQueue messageQueue;
     private final AuditService auditService;
+    private final PredictiveDispatchService predictiveDispatchService;
+    private final SlaService slaService;
 
     public WorkOrderService(WorkOrderMapper workOrderMapper,
                             DispatchRecordMapper dispatchRecordMapper,
@@ -56,7 +59,9 @@ public class WorkOrderService {
                             SparePartService sparePartService,
                             DowntimeService downtimeService,
                             LocalMessageQueue messageQueue,
-                            AuditService auditService) {
+                            AuditService auditService,
+                            @Lazy PredictiveDispatchService predictiveDispatchService,
+                            SlaService slaService) {
         this.workOrderMapper = workOrderMapper;
         this.dispatchRecordMapper = dispatchRecordMapper;
         this.faultMapper = faultMapper;
@@ -66,6 +71,8 @@ public class WorkOrderService {
         this.downtimeService = downtimeService;
         this.messageQueue = messageQueue;
         this.auditService = auditService;
+        this.predictiveDispatchService = predictiveDispatchService;
+        this.slaService = slaService;
     }
 
     /**
@@ -315,6 +322,9 @@ public class WorkOrderService {
                         + ", laborCost=" + laborCost
                         + ", repairNotes=" + repairNotes);
 
+        // 11. Finalize SLA
+        slaService.finalizeSla(workOrderId);
+
         log.info("WorkOrder [{}] completed, partsCost={}, laborCost={}",
                 workOrderId, totalPartsCost, laborCost);
         return order;
@@ -367,7 +377,8 @@ public class WorkOrderService {
         order.setUpdatedAt(LocalDateTime.now());
         workOrderMapper.updateById(order);
 
-        // 3. Release spare parts occupied by the old work order
+        // 3. Release spare parts occupied by the old work order (including pre-occupied)
+        predictiveDispatchService.releasePreOccupiedParts(workOrderId);
         sparePartService.releaseOccupationsByWorkOrder(workOrderId);
 
         // 4. Old technician: workload-1, check availability
@@ -476,7 +487,8 @@ public class WorkOrderService {
         WorkOrder order = getAndValidate(workOrderId);
         String oldStatus = order.getStatus();
 
-        // 1. Release spare parts occupation
+        // 1. Release spare parts occupation (including pre-occupied)
+        predictiveDispatchService.releasePreOccupiedParts(workOrderId);
         sparePartService.releaseOccupationsByWorkOrder(workOrderId);
 
         // 2. Release technician (workload-1)
@@ -503,6 +515,9 @@ public class WorkOrderService {
         order.setStatus(WorkOrderStatus.CLOSED_ABNORMAL.name());
         order.setUpdatedAt(LocalDateTime.now());
         workOrderMapper.updateById(order);
+
+        // 5b. Finalize SLA (mark as expired since work order was abnormally closed)
+        slaService.finalizeSla(workOrderId);
 
         // 6. Publish WORK_ORDER_CLOSED event
         Map<String, Object> eventPayload = new HashMap<>();

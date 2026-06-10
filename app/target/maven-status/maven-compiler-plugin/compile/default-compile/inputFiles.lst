@@ -7,10 +7,13 @@ C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenanc
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\dto\DispatchResult.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\enums\EventType.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\service\AuditService.java
+C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\entity\DispatchPlan.java
+C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\service\PredictiveDispatchService.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\controller\DowntimeController.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\service\AutoDispatchService.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\controller\FaultController.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\dto\PartApplyRequest.java
+C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\dto\DispatchPlanResult.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\enums\DispatchType.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\dto\FaultReportRequest.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\mapper\SparePartMapper.java
@@ -40,6 +43,7 @@ C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenanc
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\mapper\TechnicianMapper.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\entity\SparePartOccupation.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\infrastructure\queue\LocalMessageQueue.java
+C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\service\SlaService.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\infrastructure\queue\MaintenanceEvent.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\config\RedisConfig.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\mapper\WorkOrderMapper.java
@@ -50,9 +54,14 @@ C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenanc
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\consumer\PartEventConsumer.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\common\BusinessException.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\enums\EquipmentStatus.java
+C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\mapper\SlaRecordMapper.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\infrastructure\queue\EventDispatcher.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\MaintenanceApplication.java
+C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\controller\DispatchPlanController.java
+C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\consumer\PredictiveDispatchConsumer.java
+C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\mapper\DispatchPlanMapper.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\entity\WorkOrder.java
+C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\mapper\PurchaseSuggestionMapper.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\common\GlobalExceptionHandler.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\mapper\FaultMapper.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\controller\SparePartController.java
@@ -62,5 +71,8 @@ C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenanc
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\entity\AuditLog.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\controller\AuditController.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\enums\FaultLevel.java
+C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\entity\SlaRecord.java
+C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\entity\PurchaseSuggestion.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\websocket\MaintenanceWebSocketHandler.java
+C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\dto\PreOccupyResult.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\service\WorkOrderService.java

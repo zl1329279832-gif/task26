@@ -48,6 +48,8 @@ class WorkOrderServiceTest {
     @Mock private DowntimeService downtimeService;
     @Mock private LocalMessageQueue messageQueue;
     @Mock private AuditService auditService;
+    @Mock private PredictiveDispatchService predictiveDispatchService;
+    @Mock private SlaService slaService;
 
     private WorkOrderService workOrderService;
 
@@ -56,7 +58,7 @@ class WorkOrderServiceTest {
         workOrderService = new WorkOrderService(
                 workOrderMapper, dispatchRecordMapper, faultMapper, equipmentMapper,
                 technicianService, sparePartService, downtimeService,
-                messageQueue, auditService);
+                messageQueue, auditService, predictiveDispatchService, slaService);
     }
 
     private WorkOrder createWorkOrder(Long id, String status, Long techId, Long equipId, Long faultId) {

@@ -1,11 +1,17 @@
 package com.maintenance.service;
 
+import com.maintenance.dto.DispatchPlanResult;
 import com.maintenance.dto.DispatchResult;
 import com.maintenance.dto.FaultReportRequest;
+import com.maintenance.dto.PreOccupyResult;
+import com.maintenance.entity.DispatchPlan;
 import com.maintenance.entity.DowntimeRecord;
 import com.maintenance.entity.Equipment;
 import com.maintenance.entity.Fault;
+import com.maintenance.entity.PurchaseSuggestion;
+import com.maintenance.entity.SlaRecord;
 import com.maintenance.entity.SparePart;
+import com.maintenance.entity.SparePartOccupation;
 import com.maintenance.entity.WorkOrder;
 import com.maintenance.infrastructure.queue.LocalMessageQueue;
 import com.maintenance.mapper.EquipmentMapper;
@@ -21,6 +27,8 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -31,12 +39,14 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 /**
- * Tests for FaultService focusing on:
- * 1. Spare part availability check before dispatch
- * 2. Dispatch deferred when parts unavailable (non-emergency)
- * 3. Emergency dispatch attempted regardless of parts
- * 4. Downtime only started after successful dispatch
- * 5. Duplicate fault detection
+ * Tests for FaultService focusing on predictive dispatch integration:
+ * 1. SLA record creation
+ * 2. Multiple dispatch plan generation
+ * 3. Spare parts pre-occupation
+ * 4. Purchase suggestions on parts shortage
+ * 5. SLA pause when parts insufficient
+ * 6. Downtime only started after successful dispatch
+ * 7. Duplicate fault detection
  */
 @ExtendWith(MockitoExtension.class)
 class FaultServiceTest {
@@ -49,6 +59,8 @@ class FaultServiceTest {
     @Mock private AutoDispatchService autoDispatchService;
     @Mock private AuditService auditService;
     @Mock private DowntimeService downtimeService;
+    @Mock private PredictiveDispatchService predictiveDispatchService;
+    @Mock private SlaService slaService;
 
     private FaultService faultService;
 
@@ -56,7 +68,8 @@ class FaultServiceTest {
     void setUp() {
         faultService = new FaultService(
                 faultMapper, equipmentMapper, workOrderMapper, sparePartMapper,
-                messageQueue, autoDispatchService, auditService, downtimeService);
+                messageQueue, autoDispatchService, auditService, downtimeService,
+                predictiveDispatchService, slaService);
     }
 
     private FaultReportRequest createRequest(Long equipmentId, int faultLevel) {
@@ -75,40 +88,76 @@ class FaultServiceTest {
         return rec;
     }
 
-    // ========================================================
-    // TEST: Parts unavailable - non-emergency dispatch deferred
-    // ========================================================
-    @Test
-    @DisplayName("BUG FIX: Non-emergency dispatch deferred when spare parts unavailable")
-    void reportFault_defersNonEmergencyWhenPartsUnavailable() {
-        FaultReportRequest request = createRequest(1L, 1); // faultLevel=1 (MINOR)
+    private SlaRecord createSlaRecord(Long workOrderId, int faultLevel) {
+        SlaRecord record = new SlaRecord();
+        record.setId(1L);
+        record.setWorkOrderId(workOrderId);
+        record.setFaultLevel(faultLevel);
+        record.setSlaDeadline(LocalDateTime.now().plusMinutes(240));
+        record.setStatus("ACTIVE");
+        return record;
+    }
 
+    private DispatchPlan createPlan(int index, BigDecimal score) {
+        DispatchPlan plan = new DispatchPlan();
+        plan.setId((long) index);
+        plan.setPlanIndex(index);
+        plan.setTotalScore(score);
+        plan.setTechnicianId(100L + index);
+        return plan;
+    }
+
+    private void setupBasicFaultMocks(Long equipmentId) {
         Equipment equipment = new Equipment();
-        equipment.setId(1L);
+        equipment.setId(equipmentId);
         equipment.setEquipmentName("CNC Machine");
         equipment.setEquipmentType("CNC");
 
-        // All applicable parts out of stock
-        SparePart emptyPart = new SparePart();
-        emptyPart.setStockQuantity(0);
-        emptyPart.setPartCode("P001");
-
-        when(equipmentMapper.selectById(1L)).thenReturn(equipment);
-        when(faultMapper.selectRecentByEquipment(1L, 5)).thenReturn(Collections.emptyList());
-        when(equipmentMapper.updateStatus(1L, "FAULT")).thenReturn(1);
+        when(equipmentMapper.selectById(equipmentId)).thenReturn(equipment);
+        when(faultMapper.selectRecentByEquipment(equipmentId, 5)).thenReturn(Collections.emptyList());
+        when(equipmentMapper.updateStatus(equipmentId, "FAULT")).thenReturn(1);
         when(workOrderMapper.selectLatestByEquipment(anyLong(), anyString())).thenReturn(null);
-        when(sparePartMapper.selectByEquipmentType("CNC")).thenReturn(Collections.singletonList(emptyPart));
 
         doAnswer(inv -> { Fault f = inv.getArgument(0); f.setId(1L); return 1; })
                 .when(faultMapper).insert(any(Fault.class));
-        doAnswer(inv -> { WorkOrder wo = inv.getArgument(0); wo.setId(1L); return 1; })
+        doAnswer(inv -> { WorkOrder wo = inv.getArgument(0); wo.setId(1L); wo.setOrderCode("WO001"); return 1; })
                 .when(workOrderMapper).insert(any(WorkOrder.class));
+    }
+
+    // ========================================================
+    // TEST: Non-emergency dispatch deferred when parts unavailable
+    // ========================================================
+    @Test
+    @DisplayName("Non-emergency dispatch deferred when spare parts unavailable, SLA paused")
+    void reportFault_defersNonEmergencyWhenPartsUnavailable() {
+        FaultReportRequest request = createRequest(1L, 1);
+
+        setupBasicFaultMocks(1L);
+
+        SlaRecord slaRecord = createSlaRecord(1L, 1);
+        when(slaService.createSlaRecord(1L, 1)).thenReturn(slaRecord);
+        when(slaService.getByWorkOrderId(1L)).thenReturn(slaRecord);
+
+        // Plans generated but parts not available
+        List<DispatchPlan> plans = List.of(createPlan(1, BigDecimal.valueOf(80)));
+        when(predictiveDispatchService.generateDispatchPlans(any(), any(), any())).thenReturn(plans);
+
+        PreOccupyResult preOccupyResult = PreOccupyResult.builder()
+                .workOrderId(1L)
+                .occupiedParts(Collections.emptyList())
+                .shortageParts(List.of(new PurchaseSuggestion()))
+                .allPartsAvailable(false)
+                .build();
+        when(predictiveDispatchService.preOccupyParts(eq(1L), anyString(), eq(1))).thenReturn(preOccupyResult);
 
         Fault result = faultService.reportFault(request);
 
-        // Dispatch should NOT have been attempted
-        verify(autoDispatchService, never()).autoDispatch(any(), any());
-        verify(autoDispatchService, never()).emergencyDispatch(any(), any());
+        // Dispatch should NOT have been executed (parts shortage + non-emergency)
+        verify(predictiveDispatchService, never()).selectAndExecutePlan(anyLong(), anyInt());
+        // Parts should be released since dispatch deferred
+        verify(predictiveDispatchService).releasePreOccupiedParts(1L);
+        // SLA should be paused
+        verify(slaService).pauseSla(eq(1L), anyString());
         // Downtime should NOT have been started
         verify(downtimeService, never()).startDowntime(anyLong(), anyLong(), anyLong());
     }
@@ -117,38 +166,35 @@ class FaultServiceTest {
     // TEST: Emergency dispatch attempted even when parts unavailable
     // ========================================================
     @Test
-    @DisplayName("BUG FIX: Emergency dispatch (faultLevel >= 3) attempted even without parts")
+    @DisplayName("Emergency dispatch (faultLevel >= 3) attempted even without parts")
     void reportFault_emergencyDispatchAttemptedWithoutParts() {
-        FaultReportRequest request = createRequest(1L, 4); // faultLevel=4 (CRITICAL)
+        FaultReportRequest request = createRequest(1L, 4);
 
-        Equipment equipment = new Equipment();
-        equipment.setId(1L);
-        equipment.setEquipmentName("CNC Machine");
-        equipment.setEquipmentType("CNC");
+        setupBasicFaultMocks(1L);
 
-        SparePart emptyPart = new SparePart();
-        emptyPart.setStockQuantity(0);
+        SlaRecord slaRecord = createSlaRecord(1L, 4);
+        when(slaService.createSlaRecord(1L, 4)).thenReturn(slaRecord);
 
-        when(equipmentMapper.selectById(1L)).thenReturn(equipment);
-        when(faultMapper.selectRecentByEquipment(1L, 5)).thenReturn(Collections.emptyList());
-        when(equipmentMapper.updateStatus(1L, "FAULT")).thenReturn(1);
-        when(workOrderMapper.selectLatestByEquipment(anyLong(), anyString())).thenReturn(null);
-        when(sparePartMapper.selectByEquipmentType("CNC")).thenReturn(Collections.singletonList(emptyPart));
+        List<DispatchPlan> plans = List.of(createPlan(1, BigDecimal.valueOf(100)));
+        when(predictiveDispatchService.generateDispatchPlans(any(), any(), any())).thenReturn(plans);
 
-        doAnswer(inv -> { Fault f = inv.getArgument(0); f.setId(1L); return 1; })
-                .when(faultMapper).insert(any(Fault.class));
-        doAnswer(inv -> { WorkOrder wo = inv.getArgument(0); wo.setId(1L); return 1; })
-                .when(workOrderMapper).insert(any(WorkOrder.class));
+        // Parts not available but emergency
+        PreOccupyResult preOccupyResult = PreOccupyResult.builder()
+                .workOrderId(1L)
+                .occupiedParts(Collections.emptyList())
+                .shortageParts(List.of(new PurchaseSuggestion()))
+                .allPartsAvailable(false)
+                .build();
+        when(predictiveDispatchService.preOccupyParts(eq(1L), anyString(), eq(4))).thenReturn(preOccupyResult);
 
-        // Emergency dispatch succeeds
-        DispatchResult successResult = DispatchResult.success(1L, "WO001", 100L, "Tech", BigDecimal.TEN, "AUTO");
-        when(autoDispatchService.emergencyDispatch(any(), any())).thenReturn(successResult);
+        DispatchResult successResult = DispatchResult.success(1L, "WO001", 100L, "Tech", BigDecimal.valueOf(100), "AUTO");
+        when(predictiveDispatchService.selectAndExecutePlan(1L, 1)).thenReturn(successResult);
         when(downtimeService.startDowntime(anyLong(), anyLong(), anyLong())).thenReturn(createDowntimeRecord(1L));
 
         faultService.reportFault(request);
 
         // Emergency dispatch should be attempted
-        verify(autoDispatchService).emergencyDispatch(any(), any());
+        verify(predictiveDispatchService).selectAndExecutePlan(1L, 1);
         // Downtime should be started after successful dispatch
         verify(downtimeService).startDowntime(eq(1L), eq(1L), eq(1L));
     }
@@ -159,72 +205,64 @@ class FaultServiceTest {
     @Test
     @DisplayName("Normal dispatch proceeds when spare parts are available")
     void reportFault_normalDispatchWhenPartsAvailable() {
-        FaultReportRequest request = createRequest(1L, 2); // faultLevel=2 (MODERATE)
+        FaultReportRequest request = createRequest(1L, 2);
 
-        Equipment equipment = new Equipment();
-        equipment.setId(1L);
-        equipment.setEquipmentName("CNC Machine");
-        equipment.setEquipmentType("CNC");
+        setupBasicFaultMocks(1L);
 
-        SparePart partInStock = new SparePart();
-        partInStock.setStockQuantity(10);
+        SlaRecord slaRecord = createSlaRecord(1L, 2);
+        when(slaService.createSlaRecord(1L, 2)).thenReturn(slaRecord);
 
-        when(equipmentMapper.selectById(1L)).thenReturn(equipment);
-        when(faultMapper.selectRecentByEquipment(1L, 5)).thenReturn(Collections.emptyList());
-        when(equipmentMapper.updateStatus(1L, "FAULT")).thenReturn(1);
-        when(workOrderMapper.selectLatestByEquipment(anyLong(), anyString())).thenReturn(null);
-        when(sparePartMapper.selectByEquipmentType("CNC")).thenReturn(Collections.singletonList(partInStock));
+        List<DispatchPlan> plans = List.of(createPlan(1, BigDecimal.valueOf(80)));
+        when(predictiveDispatchService.generateDispatchPlans(any(), any(), any())).thenReturn(plans);
 
-        doAnswer(inv -> { Fault f = inv.getArgument(0); f.setId(1L); return 1; })
-                .when(faultMapper).insert(any(Fault.class));
-        doAnswer(inv -> { WorkOrder wo = inv.getArgument(0); wo.setId(1L); return 1; })
-                .when(workOrderMapper).insert(any(WorkOrder.class));
+        PreOccupyResult preOccupyResult = PreOccupyResult.builder()
+                .workOrderId(1L)
+                .occupiedParts(List.of(new SparePartOccupation()))
+                .shortageParts(Collections.emptyList())
+                .allPartsAvailable(true)
+                .build();
+        when(predictiveDispatchService.preOccupyParts(eq(1L), anyString(), eq(2))).thenReturn(preOccupyResult);
 
         DispatchResult successResult = DispatchResult.success(1L, "WO001", 100L, "Tech", BigDecimal.TEN, "AUTO");
-        when(autoDispatchService.autoDispatch(any(), any())).thenReturn(successResult);
+        when(predictiveDispatchService.selectAndExecutePlan(1L, 1)).thenReturn(successResult);
         when(downtimeService.startDowntime(anyLong(), anyLong(), anyLong())).thenReturn(createDowntimeRecord(1L));
 
         faultService.reportFault(request);
 
-        verify(autoDispatchService).autoDispatch(any(), any());
+        verify(predictiveDispatchService).selectAndExecutePlan(1L, 1);
         verify(downtimeService).startDowntime(eq(1L), eq(1L), eq(1L));
     }
 
     // ========================================================
-    // TEST: Dispatch failure - downtime NOT started
+    // TEST: Dispatch failure - downtime NOT started, parts released
     // ========================================================
     @Test
-    @DisplayName("BUG FIX: Downtime not started when dispatch fails")
+    @DisplayName("Downtime not started when dispatch fails, pre-occupied parts released")
     void reportFault_noDowntimeWhenDispatchFails() {
         FaultReportRequest request = createRequest(1L, 2);
 
-        Equipment equipment = new Equipment();
-        equipment.setId(1L);
-        equipment.setEquipmentName("CNC Machine");
-        equipment.setEquipmentType("CNC");
+        setupBasicFaultMocks(1L);
 
-        SparePart partInStock = new SparePart();
-        partInStock.setStockQuantity(10);
+        SlaRecord slaRecord = createSlaRecord(1L, 2);
+        when(slaService.createSlaRecord(1L, 2)).thenReturn(slaRecord);
 
-        when(equipmentMapper.selectById(1L)).thenReturn(equipment);
-        when(faultMapper.selectRecentByEquipment(1L, 5)).thenReturn(Collections.emptyList());
-        when(equipmentMapper.updateStatus(1L, "FAULT")).thenReturn(1);
-        when(workOrderMapper.selectLatestByEquipment(anyLong(), anyString())).thenReturn(null);
-        when(sparePartMapper.selectByEquipmentType("CNC")).thenReturn(Collections.singletonList(partInStock));
+        // No plans generated
+        when(predictiveDispatchService.generateDispatchPlans(any(), any(), any())).thenReturn(Collections.emptyList());
 
-        doAnswer(inv -> { Fault f = inv.getArgument(0); f.setId(1L); return 1; })
-                .when(faultMapper).insert(any(Fault.class));
-        doAnswer(inv -> { WorkOrder wo = inv.getArgument(0); wo.setId(1L); return 1; })
-                .when(workOrderMapper).insert(any(WorkOrder.class));
-
-        // Dispatch fails
-        DispatchResult failResult = DispatchResult.fail("No qualified technician");
-        when(autoDispatchService.autoDispatch(any(), any())).thenReturn(failResult);
+        PreOccupyResult preOccupyResult = PreOccupyResult.builder()
+                .workOrderId(1L)
+                .occupiedParts(Collections.emptyList())
+                .shortageParts(Collections.emptyList())
+                .allPartsAvailable(true)
+                .build();
+        when(predictiveDispatchService.preOccupyParts(eq(1L), anyString(), eq(2))).thenReturn(preOccupyResult);
 
         faultService.reportFault(request);
 
         // Downtime should NOT be started
         verify(downtimeService, never()).startDowntime(anyLong(), anyLong(), anyLong());
+        // Parts should be released since no plans available
+        verify(predictiveDispatchService).releasePreOccupiedParts(1L);
     }
 
     // ========================================================
@@ -240,7 +278,6 @@ class FaultServiceTest {
         equipment.setEquipmentName("CNC Machine");
         equipment.setEquipmentType("CNC");
 
-        // Existing fault with same level within 5 minutes
         Fault existingFault = new Fault();
         existingFault.setId(99L);
         existingFault.setFaultLevel(2);
@@ -259,75 +296,63 @@ class FaultServiceTest {
     }
 
     // ========================================================
-    // TEST: No parts configured for equipment type - dispatch proceeds
+    // TEST: SLA record created for every fault report
     // ========================================================
     @Test
-    @DisplayName("No parts configured for equipment type: dispatch proceeds (no parts needed)")
-    void reportFault_noPartsConfigured_dispatchProceeds() {
-        FaultReportRequest request = createRequest(1L, 1);
+    @DisplayName("SLA record is created for every new fault report")
+    void reportFault_slaRecordCreated() {
+        FaultReportRequest request = createRequest(1L, 3);
 
-        Equipment equipment = new Equipment();
-        equipment.setId(1L);
-        equipment.setEquipmentName("Generic Machine");
-        equipment.setEquipmentType("GENERIC");
+        setupBasicFaultMocks(1L);
 
-        when(equipmentMapper.selectById(1L)).thenReturn(equipment);
-        when(faultMapper.selectRecentByEquipment(1L, 5)).thenReturn(Collections.emptyList());
-        when(equipmentMapper.updateStatus(1L, "FAULT")).thenReturn(1);
-        when(workOrderMapper.selectLatestByEquipment(anyLong(), anyString())).thenReturn(null);
-        // No parts configured for this equipment type
-        when(sparePartMapper.selectByEquipmentType("GENERIC")).thenReturn(Collections.emptyList());
+        SlaRecord slaRecord = createSlaRecord(1L, 3);
+        when(slaService.createSlaRecord(1L, 3)).thenReturn(slaRecord);
 
-        doAnswer(inv -> { Fault f = inv.getArgument(0); f.setId(1L); return 1; })
-                .when(faultMapper).insert(any(Fault.class));
-        doAnswer(inv -> { WorkOrder wo = inv.getArgument(0); wo.setId(1L); return 1; })
-                .when(workOrderMapper).insert(any(WorkOrder.class));
-
-        DispatchResult successResult = DispatchResult.success(1L, "WO001", 100L, "Tech", BigDecimal.TEN, "AUTO");
-        when(autoDispatchService.autoDispatch(any(), any())).thenReturn(successResult);
-        when(downtimeService.startDowntime(anyLong(), anyLong(), anyLong())).thenReturn(createDowntimeRecord(1L));
+        when(predictiveDispatchService.generateDispatchPlans(any(), any(), any())).thenReturn(Collections.emptyList());
+        PreOccupyResult preOccupyResult = PreOccupyResult.builder()
+                .workOrderId(1L)
+                .occupiedParts(Collections.emptyList())
+                .shortageParts(Collections.emptyList())
+                .allPartsAvailable(true)
+                .build();
+        when(predictiveDispatchService.preOccupyParts(eq(1L), anyString(), eq(3))).thenReturn(preOccupyResult);
 
         faultService.reportFault(request);
 
-        // Dispatch should proceed (no parts needed for this type)
-        verify(autoDispatchService).autoDispatch(any(), any());
+        verify(slaService).createSlaRecord(1L, 3);
     }
 
     // ========================================================
-    // TEST: Event payload includes parts availability info
+    // TEST: Event payload includes plan and SLA info
     // ========================================================
     @Test
-    @DisplayName("FAULT_REPORTED event payload includes partsAvailable and downtimeStarted flags")
+    @DisplayName("FAULT_REPORTED event payload includes planCount, slaDeadline, purchaseSuggestionCount")
     @SuppressWarnings("unchecked")
-    void reportFault_eventPayloadIncludesPartsAndDowntimeInfo() {
+    void reportFault_eventPayloadIncludesPlanAndSlaInfo() {
         FaultReportRequest request = createRequest(1L, 2);
 
-        Equipment equipment = new Equipment();
-        equipment.setId(1L);
-        equipment.setEquipmentName("CNC Machine");
-        equipment.setEquipmentType("CNC");
+        setupBasicFaultMocks(1L);
 
-        SparePart partInStock = new SparePart();
-        partInStock.setStockQuantity(5);
+        SlaRecord slaRecord = createSlaRecord(1L, 2);
+        when(slaService.createSlaRecord(1L, 2)).thenReturn(slaRecord);
 
-        when(equipmentMapper.selectById(1L)).thenReturn(equipment);
-        when(faultMapper.selectRecentByEquipment(1L, 5)).thenReturn(Collections.emptyList());
-        when(equipmentMapper.updateStatus(1L, "FAULT")).thenReturn(1);
-        when(workOrderMapper.selectLatestByEquipment(anyLong(), anyString())).thenReturn(null);
-        when(sparePartMapper.selectByEquipmentType("CNC")).thenReturn(Collections.singletonList(partInStock));
+        List<DispatchPlan> plans = List.of(createPlan(1, BigDecimal.valueOf(80)), createPlan(2, BigDecimal.valueOf(60)));
+        when(predictiveDispatchService.generateDispatchPlans(any(), any(), any())).thenReturn(plans);
 
-        doAnswer(inv -> { Fault f = inv.getArgument(0); f.setId(1L); return 1; })
-                .when(faultMapper).insert(any(Fault.class));
-        doAnswer(inv -> { WorkOrder wo = inv.getArgument(0); wo.setId(1L); return 1; })
-                .when(workOrderMapper).insert(any(WorkOrder.class));
+        PreOccupyResult preOccupyResult = PreOccupyResult.builder()
+                .workOrderId(1L)
+                .occupiedParts(List.of(new SparePartOccupation()))
+                .shortageParts(Collections.emptyList())
+                .allPartsAvailable(true)
+                .build();
+        when(predictiveDispatchService.preOccupyParts(eq(1L), anyString(), eq(2))).thenReturn(preOccupyResult);
 
-        DispatchResult successResult = DispatchResult.success(1L, "WO001", 100L, "Tech", BigDecimal.TEN, "AUTO");
-        when(autoDispatchService.autoDispatch(any(), any())).thenReturn(successResult);
+        DispatchResult successResult = DispatchResult.success(1L, "WO001", 100L, "Tech", BigDecimal.valueOf(80), "AUTO");
+        when(predictiveDispatchService.selectAndExecutePlan(1L, 1)).thenReturn(successResult);
         when(downtimeService.startDowntime(anyLong(), anyLong(), anyLong())).thenReturn(createDowntimeRecord(1L));
 
         faultService.reportFault(request);
 
-        // Capture the event payload
         ArgumentCaptor<Object> payloadCaptor = ArgumentCaptor.forClass(Object.class);
         verify(messageQueue).publish(eq("FAULT_REPORTED"), payloadCaptor.capture());
 
@@ -335,8 +360,8 @@ class FaultServiceTest {
         assertNotNull(payload);
         assertTrue(payload instanceof Map);
         Map<String, Object> payloadMap = (Map<String, Object>) payload;
-        assertTrue((Boolean) payloadMap.get("partsAvailable"), "partsAvailable should be true");
-        assertTrue((Boolean) payloadMap.get("downtimeStarted"), "downtimeStarted should be true");
-        assertTrue((Boolean) payloadMap.get("dispatchSuccess"), "dispatchSuccess should be true");
+        assertEquals(2, payloadMap.get("planCount"));
+        assertNotNull(payloadMap.get("slaDeadline"));
+        assertTrue((Boolean) payloadMap.get("dispatchSuccess"));
     }
 }
