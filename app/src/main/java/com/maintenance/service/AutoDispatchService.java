@@ -1,6 +1,7 @@
 package com.maintenance.service;
 
 import com.maintenance.common.BusinessException;
+import com.maintenance.entity.DispatchPlan;
 import com.maintenance.entity.DispatchRecord;
 import com.maintenance.entity.Fault;
 import com.maintenance.entity.Technician;
@@ -315,12 +316,68 @@ public class AutoDispatchService {
     }
 
     /**
+     * Execute dispatch from a pre-selected dispatch plan.
+     * Creates a PREDICTIVE-type DispatchRecord, assigns technician, increments workload.
+     */
+    @Transactional
+    public com.maintenance.dto.DispatchResult executeFromPlan(DispatchPlan plan, WorkOrder workOrder, Fault fault) {
+        Technician tech = technicianMapper.selectById(plan.getTechnicianId());
+        if (tech == null) {
+            return com.maintenance.dto.DispatchResult.fail("Technician not found, id=" + plan.getTechnicianId());
+        }
+
+        // Create dispatch record
+        DispatchRecord dispatchRecord = new DispatchRecord();
+        dispatchRecord.setWorkOrderId(workOrder.getId());
+        dispatchRecord.setTechnicianId(tech.getId());
+        dispatchRecord.setDispatchType(DispatchType.PREDICTIVE.name());
+        dispatchRecord.setDispatchScore(plan.getTotalScore());
+        dispatchRecord.setIsAccepted(0);
+        dispatchRecord.setCreatedAt(LocalDateTime.now());
+        dispatchRecordMapper.insert(dispatchRecord);
+
+        // Assign technician to work order
+        workOrder.setTechnicianId(tech.getId());
+        workOrder.setDispatchPlanId(plan.getId());
+        workOrder.setStatus(WorkOrderStatus.CREATED.name());
+        workOrderMapper.updateById(workOrder);
+
+        // Increment workload
+        technicianService.incrementWorkload(tech.getId());
+
+        // Publish DISPATCH_DONE event
+        Map<String, Object> eventPayload = new HashMap<>();
+        eventPayload.put("workOrderId", workOrder.getId());
+        eventPayload.put("orderCode", workOrder.getOrderCode());
+        eventPayload.put("technicianId", tech.getId());
+        eventPayload.put("technicianName", tech.getName());
+        eventPayload.put("dispatchScore", plan.getTotalScore());
+        eventPayload.put("dispatchType", DispatchType.PREDICTIVE.name());
+        eventPayload.put("planId", plan.getId());
+        messageQueue.publish(EventType.DISPATCH_DONE.name(), eventPayload);
+
+        auditService.log("DISPATCH", "PREDICTIVE_DISPATCH", "WorkOrder", workOrder.getId(), "SYSTEM",
+                "Predictive dispatch from plan=" + plan.getId()
+                        + ", technician=" + tech.getName()
+                        + ", score=" + plan.getTotalScore());
+
+        return com.maintenance.dto.DispatchResult.success(
+                workOrder.getId(),
+                workOrder.getOrderCode(),
+                tech.getId(),
+                tech.getName(),
+                plan.getTotalScore(),
+                DispatchType.PREDICTIVE.name());
+    }
+
+    /**
      * Calculate dispatch score for a single technician.
      * Total possible: 0-125 points across 5 dimensions.
      *
      * Now takes pre-fetched TechnicianSkill to avoid redundant DB queries.
+     * Package-private for reuse by PredictiveDispatchService.
      */
-    private BigDecimal calculateScore(Technician tech, WorkOrder order, Fault fault, TechnicianSkill skill) {
+    BigDecimal calculateScore(Technician tech, WorkOrder order, Fault fault, TechnicianSkill skill) {
         BigDecimal totalScore = BigDecimal.ZERO;
 
         // a. Skill match (0-30 points)

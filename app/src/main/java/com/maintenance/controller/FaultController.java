@@ -1,9 +1,14 @@
 package com.maintenance.controller;
 
 import com.maintenance.common.Result;
+import com.maintenance.dto.DispatchPlanDTO;
+import com.maintenance.dto.DispatchResult;
 import com.maintenance.dto.FaultReportRequest;
+import com.maintenance.dto.PredictiveDispatchResult;
+import com.maintenance.dto.SelectPlanRequest;
 import com.maintenance.entity.Fault;
 import com.maintenance.service.FaultService;
+import com.maintenance.service.PredictiveDispatchService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -20,16 +25,34 @@ import java.util.List;
 public class FaultController {
 
     private final FaultService faultService;
+    private final PredictiveDispatchService predictiveDispatchService;
 
-    public FaultController(FaultService faultService) {
+    public FaultController(FaultService faultService,
+                           PredictiveDispatchService predictiveDispatchService) {
         this.faultService = faultService;
+        this.predictiveDispatchService = predictiveDispatchService;
     }
 
     @PostMapping("/report")
-    public Result<Fault> reportFault(@RequestBody FaultReportRequest request) {
+    public Result<PredictiveDispatchResult> reportFault(@RequestBody FaultReportRequest request) {
         log.info("故障上报, equipmentId={}, faultLevel={}", request.getEquipmentId(), request.getFaultLevel());
-        Fault fault = faultService.reportFault(request);
-        return Result.ok(fault);
+        PredictiveDispatchResult result = faultService.reportFault(request);
+        return Result.ok(result);
+    }
+
+    @PostMapping("/{faultId}/select-plan")
+    public Result<DispatchResult> selectDispatchPlan(@PathVariable Long faultId,
+                                                      @RequestBody SelectPlanRequest request) {
+        log.info("选择派工方案, faultId={}, planId={}", faultId, request.getPlanId());
+        DispatchResult result = predictiveDispatchService.selectAndExecutePlan(request.getPlanId());
+        return Result.ok(result);
+    }
+
+    @GetMapping("/{faultId}/dispatch-plans")
+    public Result<List<DispatchPlanDTO>> getDispatchPlans(@PathVariable Long faultId) {
+        log.info("查询派工方案, faultId={}", faultId);
+        List<DispatchPlanDTO> plans = predictiveDispatchService.getPlansByFault(faultId);
+        return Result.ok(plans);
     }
 
     @GetMapping("/{id}")

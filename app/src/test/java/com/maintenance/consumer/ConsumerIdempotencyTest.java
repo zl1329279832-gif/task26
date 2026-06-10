@@ -190,4 +190,44 @@ class ConsumerIdempotencyTest {
         assertTrue(downtimeConsumer.supportsEventType("DOWNTIME_FORCE_END"));
         assertFalse(downtimeConsumer.supportsEventType("FAULT_REPORTED"));
     }
+
+    // ========================================================
+    // TEST: PreReservationEventConsumer - duplicate events are skipped
+    // ========================================================
+    @Test
+    @DisplayName("BUG FIX: PreReservationEventConsumer must skip duplicate events")
+    void preReservationConsumer_skipsDuplicateEvents() {
+        PreReservationEventConsumer consumer = new PreReservationEventConsumer(wsHandler, auditService);
+
+        MaintenanceEvent event = new MaintenanceEvent();
+        event.setEventId("pre-res-dup-001");
+        event.setEventType("PART_PRE_RESERVED");
+        event.setPayload("{\"workOrderId\":1,\"partCode\":\"P001\",\"quantity\":2}");
+
+        consumer.handleEvent(event);
+        consumer.handleEvent(event); // duplicate
+
+        // Broadcast should only happen once
+        verify(wsHandler, times(1)).broadcast(eq("PART_PRE_RESERVED"), any());
+    }
+
+    // ========================================================
+    // TEST: DispatchPlanEventConsumer - duplicate events are skipped
+    // ========================================================
+    @Test
+    @DisplayName("BUG FIX: DispatchPlanEventConsumer must skip duplicate events")
+    void dispatchPlanConsumer_skipsDuplicateEvents() {
+        DispatchPlanEventConsumer consumer = new DispatchPlanEventConsumer(wsHandler, auditService);
+
+        MaintenanceEvent event = new MaintenanceEvent();
+        event.setEventId("dispatch-plan-dup-001");
+        event.setEventType("DISPATCH_PLANS_GENERATED");
+        event.setPayload("{\"workOrderId\":1,\"orderCode\":\"WO001\",\"planCount\":3,\"partsPreReserved\":true}");
+
+        consumer.handleEvent(event);
+        consumer.handleEvent(event); // duplicate
+
+        // Broadcast should only happen once
+        verify(wsHandler, times(1)).broadcast(eq("DISPATCH_PLANS_READY"), any());
+    }
 }

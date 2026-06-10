@@ -9,7 +9,8 @@ public enum DispatchType {
 
     AUTO(1, "自动派工"),
     MANUAL(2, "手动派工"),
-    REASSIGN(3, "转派");
+    REASSIGN(3, "转派"),
+    PREDICTIVE(4, "预测性派工");
 
     private final int code;
     private final String desc;

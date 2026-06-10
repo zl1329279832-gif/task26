@@ -18,6 +18,7 @@ import com.maintenance.infrastructure.queue.LocalMessageQueue;
 import com.maintenance.mapper.DispatchRecordMapper;
 import com.maintenance.mapper.EquipmentMapper;
 import com.maintenance.mapper.FaultMapper;
+import com.maintenance.mapper.PurchaseSuggestionMapper;
 import com.maintenance.mapper.WorkOrderMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -47,6 +48,7 @@ public class WorkOrderService {
     private final DowntimeService downtimeService;
     private final LocalMessageQueue messageQueue;
     private final AuditService auditService;
+    private final PurchaseSuggestionMapper purchaseSuggestionMapper;
 
     public WorkOrderService(WorkOrderMapper workOrderMapper,
                             DispatchRecordMapper dispatchRecordMapper,
@@ -56,7 +58,8 @@ public class WorkOrderService {
                             SparePartService sparePartService,
                             DowntimeService downtimeService,
                             LocalMessageQueue messageQueue,
-                            AuditService auditService) {
+                            AuditService auditService,
+                            PurchaseSuggestionMapper purchaseSuggestionMapper) {
         this.workOrderMapper = workOrderMapper;
         this.dispatchRecordMapper = dispatchRecordMapper;
         this.faultMapper = faultMapper;
@@ -66,6 +69,7 @@ public class WorkOrderService {
         this.downtimeService = downtimeService;
         this.messageQueue = messageQueue;
         this.auditService = auditService;
+        this.purchaseSuggestionMapper = purchaseSuggestionMapper;
     }
 
     /**
@@ -193,6 +197,9 @@ public class WorkOrderService {
         downtimeService.endDowntime(order.getEquipmentId(), workOrderId);
         log.info("Downtime paused for workOrder [{}] due to suspension", workOrderId);
 
+        // Pause SLA timer
+        pauseSla(order);
+
         publishStatusChange(order, currentStatus.name(), targetStatus.name());
 
         auditService.log("WORK_ORDER", "SUSPEND", "WorkOrder", workOrderId, "SYSTEM",
@@ -225,6 +232,9 @@ public class WorkOrderService {
         // FIX: Restart downtime record when resuming from suspension
         downtimeService.startDowntime(order.getEquipmentId(), workOrderId, order.getFaultId());
         log.info("Downtime restarted for workOrder [{}] on resume", workOrderId);
+
+        // Resume SLA timer
+        resumeSla(order);
 
         publishStatusChange(order, currentStatus.name(), targetStatus.name());
 
@@ -476,8 +486,11 @@ public class WorkOrderService {
         WorkOrder order = getAndValidate(workOrderId);
         String oldStatus = order.getStatus();
 
-        // 1. Release spare parts occupation
+        // 1. Release spare parts occupation (includes PRE_RESERVED)
         sparePartService.releaseOccupationsByWorkOrder(workOrderId);
+
+        // 1b. Cancel pending purchase suggestions
+        purchaseSuggestionMapper.cancelPendingByWorkOrder(workOrderId);
 
         // 2. Release technician (workload-1)
         if (order.getTechnicianId() != null) {
@@ -547,6 +560,59 @@ public class WorkOrderService {
      */
     public List<WorkOrder> getActiveByTechnician(Long technicianId) {
         return workOrderMapper.selectActiveByTechnicianId(technicianId);
+    }
+
+    /**
+     * Pause SLA timer for a work order.
+     */
+    public void pauseSla(WorkOrder order) {
+        if (order.getSlaPausedAt() != null) {
+            log.info("SLA already paused for workOrder [{}]", order.getId());
+            return;
+        }
+        order.setSlaPausedAt(LocalDateTime.now());
+        order.setUpdatedAt(LocalDateTime.now());
+        workOrderMapper.updateById(order);
+
+        Map<String, Object> eventPayload = new HashMap<>();
+        eventPayload.put("workOrderId", order.getId());
+        eventPayload.put("orderCode", order.getOrderCode());
+        eventPayload.put("pausedAt", order.getSlaPausedAt().toString());
+        messageQueue.publish(EventType.SLA_PAUSED.name(), eventPayload);
+
+        auditService.log("WORK_ORDER", "SLA_PAUSE", "WorkOrder", order.getId(), "SYSTEM",
+                "SLA timer paused");
+        log.info("SLA paused for workOrder [{}]", order.getId());
+    }
+
+    /**
+     * Resume SLA timer for a work order.
+     */
+    public void resumeSla(WorkOrder order) {
+        if (order.getSlaPausedAt() == null) {
+            log.info("SLA not paused for workOrder [{}], nothing to resume", order.getId());
+            return;
+        }
+
+        long pausedMinutes = java.time.Duration.between(order.getSlaPausedAt(), LocalDateTime.now()).toMinutes();
+        int accumulated = (order.getSlaPausedDurationMinutes() != null ? order.getSlaPausedDurationMinutes() : 0)
+                + (int) pausedMinutes;
+        order.setSlaPausedDurationMinutes(accumulated);
+        order.setSlaPausedAt(null);
+        order.setUpdatedAt(LocalDateTime.now());
+        workOrderMapper.updateById(order);
+
+        Map<String, Object> eventPayload = new HashMap<>();
+        eventPayload.put("workOrderId", order.getId());
+        eventPayload.put("orderCode", order.getOrderCode());
+        eventPayload.put("pausedMinutes", pausedMinutes);
+        eventPayload.put("totalPausedMinutes", accumulated);
+        messageQueue.publish(EventType.SLA_RESUMED.name(), eventPayload);
+
+        auditService.log("WORK_ORDER", "SLA_RESUME", "WorkOrder", order.getId(), "SYSTEM",
+                "SLA timer resumed, paused for " + pausedMinutes + " minutes, total=" + accumulated);
+        log.info("SLA resumed for workOrder [{}], paused {}min, total={}min",
+                order.getId(), pausedMinutes, accumulated);
     }
 
     /**

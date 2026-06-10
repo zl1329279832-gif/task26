@@ -12,6 +12,7 @@ import com.maintenance.infrastructure.queue.LocalMessageQueue;
 import com.maintenance.mapper.DispatchRecordMapper;
 import com.maintenance.mapper.EquipmentMapper;
 import com.maintenance.mapper.FaultMapper;
+import com.maintenance.mapper.PurchaseSuggestionMapper;
 import com.maintenance.mapper.WorkOrderMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -21,6 +22,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
 import java.util.Collections;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -46,6 +48,7 @@ class WorkOrderServiceTest {
     @Mock private TechnicianService technicianService;
     @Mock private SparePartService sparePartService;
     @Mock private DowntimeService downtimeService;
+    @Mock private PurchaseSuggestionMapper purchaseSuggestionMapper;
     @Mock private LocalMessageQueue messageQueue;
     @Mock private AuditService auditService;
 
@@ -56,7 +59,7 @@ class WorkOrderServiceTest {
         workOrderService = new WorkOrderService(
                 workOrderMapper, dispatchRecordMapper, faultMapper, equipmentMapper,
                 technicianService, sparePartService, downtimeService,
-                messageQueue, auditService);
+                messageQueue, auditService, purchaseSuggestionMapper);
     }
 
     private WorkOrder createWorkOrder(Long id, String status, Long techId, Long equipId, Long faultId) {
@@ -280,5 +283,62 @@ class WorkOrderServiceTest {
                 () -> workOrderService.accept(1L, 100L));
 
         assertTrue(ex.getMessage().contains("Cannot transition"));
+    }
+
+    // ========================================================
+    // TEST: Suspend also pauses SLA timer
+    // ========================================================
+    @Test
+    @DisplayName("Suspend pauses SLA timer and publishes SLA_PAUSED event")
+    void suspend_pausesSla() {
+        WorkOrder order = createWorkOrder(1L, "REPAIRING", 100L, 50L, 10L);
+
+        when(workOrderMapper.selectById(1L)).thenReturn(order);
+        when(workOrderMapper.updateById(any())).thenReturn(1);
+        when(downtimeService.endDowntime(50L, 1L)).thenReturn(new DowntimeRecord());
+
+        workOrderService.suspend(1L, "waiting for parts");
+
+        verify(messageQueue).publish(eq("SLA_PAUSED"), any());
+        verify(auditService).log(eq("WORK_ORDER"), eq("SLA_PAUSE"), eq("WorkOrder"), eq(1L), eq("SYSTEM"), anyString());
+    }
+
+    // ========================================================
+    // TEST: closeAbnormal cancels pending purchase suggestions
+    // ========================================================
+    @Test
+    @DisplayName("closeAbnormal cancels pending purchase suggestions")
+    void closeAbnormal_cancelsPurchaseSuggestions() {
+        WorkOrder order = createWorkOrder(1L, "REPAIRING", 100L, 50L, 10L);
+
+        when(workOrderMapper.selectById(1L)).thenReturn(order);
+        when(workOrderMapper.updateById(any())).thenReturn(1);
+        when(workOrderMapper.selectActiveByTechnicianId(100L)).thenReturn(Collections.emptyList());
+        when(downtimeService.endDowntime(50L, 1L)).thenReturn(new DowntimeRecord());
+        when(faultMapper.updateStatus(anyLong(), anyString())).thenReturn(1);
+
+        workOrderService.closeAbnormal(1L, "equipment scrapped");
+
+        verify(purchaseSuggestionMapper).cancelPendingByWorkOrder(1L);
+    }
+
+    // ========================================================
+    // TEST: Resume also resumes SLA timer
+    // ========================================================
+    @Test
+    @DisplayName("Resume resumes SLA timer and publishes SLA_RESUMED event")
+    void resume_resumesSla() {
+        WorkOrder order = createWorkOrder(1L, "SUSPENDED", 100L, 50L, 10L);
+        order.setSlaPausedAt(LocalDateTime.now().minusMinutes(30));
+        order.setSlaPausedDurationMinutes(0);
+
+        when(workOrderMapper.selectById(1L)).thenReturn(order);
+        when(workOrderMapper.updateById(any())).thenReturn(1);
+        when(downtimeService.startDowntime(50L, 1L, 10L)).thenReturn(new DowntimeRecord());
+
+        workOrderService.resume(1L);
+
+        verify(messageQueue).publish(eq("SLA_RESUMED"), any());
+        assertNull(order.getSlaPausedAt());
     }
 }

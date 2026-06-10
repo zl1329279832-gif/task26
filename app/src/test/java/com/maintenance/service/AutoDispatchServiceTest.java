@@ -1,6 +1,7 @@
 package com.maintenance.service;
 
 import com.maintenance.dto.DispatchResult;
+import com.maintenance.entity.DispatchPlan;
 import com.maintenance.entity.Fault;
 import com.maintenance.entity.Technician;
 import com.maintenance.entity.TechnicianSkill;
@@ -19,6 +20,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -305,5 +307,59 @@ class AutoDispatchServiceTest {
 
         assertTrue(result.isSuccess(), "BUSY tech should be dispatchable");
         assertEquals(1L, result.getTechnicianId());
+    }
+
+    // ========================================================
+    // TEST: Execute from dispatch plan creates PREDICTIVE dispatch record
+    // ========================================================
+    @Test
+    @DisplayName("Execute from dispatch plan creates PREDICTIVE dispatch record")
+    void executeFromPlan_createsDispatchRecord() {
+        DispatchPlan plan = new DispatchPlan();
+        plan.setId(1L);
+        plan.setWorkOrderId(1L);
+        plan.setFaultId(1L);
+        plan.setTechnicianId(1L);
+        plan.setTotalScore(BigDecimal.valueOf(85));
+
+        WorkOrder workOrder = createWorkOrder(1L, "WO001", 2);
+        Fault fault = createFault(1L, "CNC", 2);
+
+        Technician tech = createTechnician(1L, "GoodTech", TechnicianAvailability.AVAILABLE.name(), 0);
+
+        when(technicianMapper.selectById(1L)).thenReturn(tech);
+        when(dispatchRecordMapper.insert(any())).thenReturn(1);
+        when(workOrderMapper.updateById(any())).thenReturn(1);
+
+        DispatchResult result = autoDispatchService.executeFromPlan(plan, workOrder, fault);
+
+        assertTrue(result.isSuccess());
+        assertEquals("PREDICTIVE", result.getDispatchType());
+        verify(technicianService).incrementWorkload(1L);
+        verify(messageQueue).publish(eq("DISPATCH_DONE"), any());
+    }
+
+    // ========================================================
+    // TEST: Execute from plan fails when technician not found
+    // ========================================================
+    @Test
+    @DisplayName("Execute from plan fails when technician not found")
+    void executeFromPlan_technicianNotFound_fails() {
+        DispatchPlan plan = new DispatchPlan();
+        plan.setId(1L);
+        plan.setWorkOrderId(1L);
+        plan.setFaultId(1L);
+        plan.setTechnicianId(999L);
+        plan.setTotalScore(BigDecimal.valueOf(85));
+
+        WorkOrder workOrder = createWorkOrder(1L, "WO001", 2);
+        Fault fault = createFault(1L, "CNC", 2);
+
+        when(technicianMapper.selectById(999L)).thenReturn(null);
+
+        DispatchResult result = autoDispatchService.executeFromPlan(plan, workOrder, fault);
+
+        assertFalse(result.isSuccess());
+        assertTrue(result.getMessage().contains("Technician not found"));
     }
 }

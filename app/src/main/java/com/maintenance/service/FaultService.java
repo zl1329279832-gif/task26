@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.maintenance.common.BusinessException;
 import com.maintenance.dto.DispatchResult;
 import com.maintenance.dto.FaultReportRequest;
+import com.maintenance.dto.PredictiveDispatchResult;
 import com.maintenance.entity.DowntimeRecord;
 import com.maintenance.entity.Equipment;
 import com.maintenance.entity.Fault;
@@ -42,6 +43,7 @@ public class FaultService {
     private final SparePartMapper sparePartMapper;
     private final LocalMessageQueue messageQueue;
     private final AutoDispatchService autoDispatchService;
+    private final PredictiveDispatchService predictiveDispatchService;
     private final AuditService auditService;
     private final DowntimeService downtimeService;
 
@@ -51,6 +53,7 @@ public class FaultService {
                         SparePartMapper sparePartMapper,
                         LocalMessageQueue messageQueue,
                         AutoDispatchService autoDispatchService,
+                        PredictiveDispatchService predictiveDispatchService,
                         AuditService auditService,
                         DowntimeService downtimeService) {
         this.faultMapper = faultMapper;
@@ -59,6 +62,7 @@ public class FaultService {
         this.sparePartMapper = sparePartMapper;
         this.messageQueue = messageQueue;
         this.autoDispatchService = autoDispatchService;
+        this.predictiveDispatchService = predictiveDispatchService;
         this.auditService = auditService;
         this.downtimeService = downtimeService;
     }
@@ -77,7 +81,7 @@ public class FaultService {
      *    dispatchSuccess=false so supervisors are notified.
      */
     @Transactional
-    public Fault reportFault(FaultReportRequest request) {
+    public PredictiveDispatchResult reportFault(FaultReportRequest request) {
         // Validate equipment
         Equipment equipment = equipmentMapper.selectById(request.getEquipmentId());
         if (equipment == null) {
@@ -88,13 +92,16 @@ public class FaultService {
         List<Fault> recentFaults = faultMapper.selectRecentByEquipment(request.getEquipmentId(), 5);
         for (Fault recentFault : recentFaults) {
             if (recentFault.getFaultLevel().equals(request.getFaultLevel())) {
-                // Duplicate found - increment occurrence count and append description
                 String appendDesc = "[Duplicate report at " + LocalDateTime.now()
                         + "] " + request.getFaultDescription();
                 faultMapper.incrementOccurrenceCount(recentFault.getId(), appendDesc);
                 log.info("Duplicate fault detected for equipment [{}], existing faultId={}, occurrenceCount incremented",
                         request.getEquipmentId(), recentFault.getId());
-                return faultMapper.selectById(recentFault.getId());
+                Fault existingFault = faultMapper.selectById(recentFault.getId());
+                return PredictiveDispatchResult.builder()
+                        .success(true)
+                        .message("重复故障已合并, faultId=" + existingFault.getId())
+                        .build();
             }
         }
 
@@ -117,7 +124,6 @@ public class FaultService {
 
         // 3. Update equipment status to FAULT
         equipmentMapper.updateStatus(request.getEquipmentId(), EquipmentStatus.FAULT.name());
-        log.info("Equipment [{}] status updated to FAULT", request.getEquipmentId());
 
         // 4. Create work order
         WorkOrder workOrder = new WorkOrder();
@@ -130,7 +136,7 @@ public class FaultService {
         workOrder.setReassignCount(0);
         workOrder.setEscalateCount(0);
 
-        // Detect re-repair: check if equipment had a COMPLETED order within 24 hours
+        // Detect re-repair
         WorkOrder recentCompletedOrder = workOrderMapper.selectLatestByEquipment(
                 request.getEquipmentId(), WorkOrderStatus.COMPLETED.name());
         if (recentCompletedOrder != null && recentCompletedOrder.getCompletedAt() != null) {
@@ -152,52 +158,11 @@ public class FaultService {
         log.info("Work order created: orderCode={}, faultId={}, priority={}",
                 workOrder.getOrderCode(), fault.getId(), workOrder.getPriority());
 
-        // 5. FIX: Check spare part availability before dispatching
-        boolean partsAvailable = checkSparePartAvailability(equipment.getEquipmentType());
-        if (!partsAvailable) {
-            log.warn("Insufficient spare parts for equipment type [{}], "
-                            + "work order [{}] created but dispatch deferred",
-                    equipment.getEquipmentType(), workOrder.getId());
-            auditService.log("FAULT", "PARTS_UNAVAILABLE", "WorkOrder", workOrder.getId(), "SYSTEM",
-                    "Dispatch deferred: insufficient spare parts for equipment type="
-                            + equipment.getEquipmentType());
-        }
+        // 5. Generate predictive dispatch plans (replaces direct auto-dispatch)
+        PredictiveDispatchResult result = predictiveDispatchService.generateDispatchPlans(
+                workOrder, fault, equipment);
 
-        // 6. Dispatch based on fault level (only if parts are available or it's an emergency)
-        DispatchResult dispatchResult;
-        boolean downtimeStarted = false;
-
-        if (!partsAvailable && request.getFaultLevel() < 3) {
-            // Non-emergency with insufficient parts: defer dispatch
-            dispatchResult = DispatchResult.fail(
-                    "Dispatch deferred: insufficient spare parts for equipment type="
-                            + equipment.getEquipmentType());
-            log.info("Non-emergency dispatch deferred for workOrder [{}] due to parts shortage",
-                    workOrder.getId());
-        } else {
-            // Emergency (faultLevel >= 3) always attempts dispatch regardless of parts
-            // Normal dispatch when parts are available
-            if (request.getFaultLevel() >= 3) {
-                dispatchResult = autoDispatchService.emergencyDispatch(workOrder, fault);
-            } else {
-                dispatchResult = autoDispatchService.autoDispatch(workOrder, fault);
-            }
-
-            // 7. FIX: Only start downtime AFTER successful dispatch
-            if (dispatchResult.isSuccess()) {
-                DowntimeRecord downtimeRecord = downtimeService.startDowntime(
-                        request.getEquipmentId(), workOrder.getId(), fault.getId());
-                downtimeStarted = true;
-                log.info("Downtime started for equipment [{}], downtimeRecordId={}, workOrderId={}",
-                        request.getEquipmentId(), downtimeRecord.getId(), workOrder.getId());
-            } else {
-                log.warn("Dispatch failed for workOrder [{}], downtime not started. "
-                                + "Equipment stays in FAULT status. Result: {}",
-                        workOrder.getId(), dispatchResult.getMessage());
-            }
-        }
-
-        // 8. Publish FAULT_REPORTED event
+        // 6. Publish FAULT_REPORTED event with enriched payload
         Map<String, Object> eventPayload = new HashMap<>();
         eventPayload.put("faultId", fault.getId());
         eventPayload.put("faultCode", fault.getFaultCode());
@@ -206,20 +171,21 @@ public class FaultService {
         eventPayload.put("workOrderId", workOrder.getId());
         eventPayload.put("orderCode", workOrder.getOrderCode());
         eventPayload.put("faultDescription", request.getFaultDescription());
-        eventPayload.put("dispatchSuccess", dispatchResult.isSuccess());
-        eventPayload.put("partsAvailable", partsAvailable);
-        eventPayload.put("downtimeStarted", downtimeStarted);
+        eventPayload.put("plansGenerated", result.isSuccess());
+        eventPayload.put("planCount", result.getPlans() != null ? result.getPlans().size() : 0);
+        eventPayload.put("partsPreReserved", result.isPartsPreReserved());
+        eventPayload.put("slaPaused", result.isSlaPaused());
+        eventPayload.put("dispatchSuccess", result.getDispatchResult() != null && result.getDispatchResult().isSuccess());
         messageQueue.publish(EventType.FAULT_REPORTED.name(), eventPayload);
 
-        // 9. Audit log
+        // 7. Audit log
         auditService.log("FAULT", "REPORT", "Fault", fault.getId(), request.getReporter(),
                 "Fault reported: code=" + fault.getFaultCode()
                         + ", equipment=" + equipment.getEquipmentName()
                         + ", level=" + request.getFaultLevel()
-                        + ", dispatchResult=" + dispatchResult.getMessage()
-                        + ", partsAvailable=" + partsAvailable);
+                        + ", plans=" + (result.getPlans() != null ? result.getPlans().size() : 0));
 
-        return fault;
+        return result;
     }
 
     /**

@@ -54,4 +54,12 @@ public class WorkOrder {
     private LocalDateTime completedAt;
 
     private LocalDateTime suspendedAt;
+
+    private LocalDateTime slaDeadline;
+
+    private LocalDateTime slaPausedAt;
+
+    private Integer slaPausedDurationMinutes;
+
+    private Long dispatchPlanId;
 }

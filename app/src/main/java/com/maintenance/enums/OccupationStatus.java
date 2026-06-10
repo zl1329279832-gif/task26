@@ -9,7 +9,8 @@ public enum OccupationStatus {
 
     OCCUPIED(1, "已占用"),
     CONSUMED(2, "已消耗"),
-    RELEASED(3, "已释放");
+    RELEASED(3, "已释放"),
+    PRE_RESERVED(4, "预占用");
 
     private final int code;
     private final String desc;

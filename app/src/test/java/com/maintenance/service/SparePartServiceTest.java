@@ -1,9 +1,11 @@
 package com.maintenance.service;
 
 import com.maintenance.common.BusinessException;
+import com.maintenance.entity.SparePart;
 import com.maintenance.entity.SparePartOccupation;
 import com.maintenance.enums.OccupationStatus;
 import com.maintenance.infrastructure.queue.LocalMessageQueue;
+import com.maintenance.mapper.PurchaseSuggestionMapper;
 import com.maintenance.mapper.SparePartMapper;
 import com.maintenance.mapper.SparePartOccupationMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -17,6 +19,7 @@ import org.springframework.data.redis.core.ValueOperations;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -36,6 +39,7 @@ class SparePartServiceTest {
     @Mock private SparePartOccupationMapper sparePartOccupationMapper;
     @Mock private RedisTemplate<String, Object> redisTemplate;
     @Mock private ValueOperations<String, Object> valueOperations;
+    @Mock private PurchaseSuggestionMapper purchaseSuggestionMapper;
     @Mock private LocalMessageQueue messageQueue;
     @Mock private AuditService auditService;
 
@@ -44,8 +48,8 @@ class SparePartServiceTest {
     @BeforeEach
     void setUp() {
         sparePartService = new SparePartService(
-                sparePartMapper, sparePartOccupationMapper, redisTemplate,
-                messageQueue, auditService);
+                sparePartMapper, sparePartOccupationMapper, purchaseSuggestionMapper,
+                redisTemplate, messageQueue, auditService);
         lenient().when(redisTemplate.opsForValue()).thenReturn(valueOperations);
     }
 
@@ -150,5 +154,105 @@ class SparePartServiceTest {
         // Should have retried and succeeded
         verify(sparePartMapper).increaseStock(10L, 2);
         verify(sparePartOccupationMapper).updateStatus(eq(1L), eq("RELEASED"), any());
+    }
+
+    // ========================================================
+    // TEST: Pre-reserve parts when stock is sufficient
+    // ========================================================
+    @Test
+    @DisplayName("Pre-reserve parts: sufficient stock results in successful reservation")
+    void preReserveParts_sufficientStock() {
+        SparePart part = new SparePart();
+        part.setId(1L);
+        part.setPartCode("P001");
+        part.setPartName("Bearing");
+        part.setStockQuantity(10);
+        part.setEquipmentType("CNC");
+
+        when(sparePartMapper.selectByEquipmentType("CNC")).thenReturn(Collections.singletonList(part));
+        when(valueOperations.setIfAbsent(anyString(), anyString(), anyLong(), any(TimeUnit.class)))
+                .thenReturn(true);
+        when(sparePartMapper.selectById(1L)).thenReturn(part);
+        when(sparePartMapper.decreaseStock(1L, 1)).thenReturn(1);
+        doAnswer(inv -> { SparePartOccupation occ = inv.getArgument(0); occ.setId(1L); return 1; })
+                .when(sparePartOccupationMapper).insert(any(SparePartOccupation.class));
+
+        // faultLevel=2 -> requiredQty=1
+        List<SparePartOccupation> result = sparePartService.preReserveParts(1L, "CNC", 2);
+
+        assertFalse(result.isEmpty());
+        verify(sparePartMapper).decreaseStock(eq(1L), eq(1));
+        verify(sparePartOccupationMapper).insert(argThat(occ ->
+                OccupationStatus.PRE_RESERVED.name().equals(occ.getStatus())));
+    }
+
+    // ========================================================
+    // TEST: Pre-reserve parts - insufficient stock publishes failure
+    // ========================================================
+    @Test
+    @DisplayName("Pre-reserve parts: insufficient stock publishes failure event")
+    void preReserveParts_insufficientStock() {
+        SparePart part = new SparePart();
+        part.setId(1L);
+        part.setPartCode("P001");
+        part.setPartName("Bearing");
+        part.setStockQuantity(0);
+        part.setEquipmentType("CNC");
+
+        SparePart freshPart = new SparePart();
+        freshPart.setId(1L);
+        freshPart.setPartCode("P001");
+        freshPart.setStockQuantity(0);
+
+        when(sparePartMapper.selectByEquipmentType("CNC")).thenReturn(Collections.singletonList(part));
+        when(valueOperations.setIfAbsent(anyString(), anyString(), anyLong(), any(TimeUnit.class)))
+                .thenReturn(true);
+        when(sparePartMapper.selectById(1L)).thenReturn(freshPart);
+
+        List<SparePartOccupation> result = sparePartService.preReserveParts(1L, "CNC", 2);
+
+        assertTrue(result.isEmpty());
+        verify(messageQueue).publish(eq("PART_PRE_RESERVE_FAILED"), any());
+        verify(sparePartMapper, never()).decreaseStock(anyLong(), anyInt());
+    }
+
+    // ========================================================
+    // TEST: Release PRE_RESERVED parts successfully
+    // ========================================================
+    @Test
+    @DisplayName("Release PRE_RESERVED parts restores stock and updates status")
+    void releasePreReservationsByWorkOrder_success() {
+        SparePartOccupation occ = new SparePartOccupation();
+        occ.setId(1L);
+        occ.setPartId(10L);
+        occ.setQuantity(2);
+        occ.setStatus(OccupationStatus.PRE_RESERVED.name());
+
+        when(sparePartOccupationMapper.selectByWorkOrderAndStatus(1L, "PRE_RESERVED"))
+                .thenReturn(Collections.singletonList(occ));
+        when(valueOperations.setIfAbsent(anyString(), anyString(), anyLong(), any(TimeUnit.class)))
+                .thenReturn(true);
+        when(sparePartMapper.increaseStock(10L, 2)).thenReturn(1);
+        when(sparePartOccupationMapper.updateStatus(eq(1L), eq("RELEASED"), any())).thenReturn(1);
+
+        sparePartService.releasePreReservationsByWorkOrder(1L);
+
+        verify(sparePartMapper).increaseStock(10L, 2);
+        verify(sparePartOccupationMapper).updateStatus(eq(1L), eq("RELEASED"), any());
+    }
+
+    // ========================================================
+    // TEST: Promote PRE_RESERVED to OCCUPIED
+    // ========================================================
+    @Test
+    @DisplayName("Promote PRE_RESERVED to OCCUPIED updates status and logs audit")
+    void promotePreReservationsToOccupied_success() {
+        when(sparePartOccupationMapper.batchUpdateStatus(eq(1L), eq("PRE_RESERVED"), eq("OCCUPIED"), any()))
+                .thenReturn(3);
+
+        sparePartService.promotePreReservationsToOccupied(1L);
+
+        verify(sparePartOccupationMapper).batchUpdateStatus(eq(1L), eq("PRE_RESERVED"), eq("OCCUPIED"), any());
+        verify(auditService).log(eq("SPARE_PART"), eq("PROMOTE_PRE_RESERVED"), eq("WorkOrder"), eq(1L), eq("SYSTEM"), anyString());
     }
 }

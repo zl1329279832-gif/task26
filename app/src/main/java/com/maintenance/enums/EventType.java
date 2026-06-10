@@ -18,7 +18,14 @@ public enum EventType {
     REPAIR_COMPLETED("维修完成"),
     WORK_ORDER_REASSIGNED("工单转派"),
     WORK_ORDER_ESCALATED("工单升级"),
-    WORK_ORDER_CLOSED("工单关闭");
+    WORK_ORDER_CLOSED("工单关闭"),
+    DISPATCH_PLANS_GENERATED("派工方案生成"),
+    DISPATCH_PLAN_SELECTED("派工方案选中"),
+    PART_PRE_RESERVED("备件预占用"),
+    PART_PRE_RESERVE_FAILED("备件预占用失败"),
+    PURCHASE_SUGGESTION_CREATED("采购建议生成"),
+    SLA_PAUSED("SLA暂停"),
+    SLA_RESUMED("SLA恢复");
 
     private final String desc;
 }

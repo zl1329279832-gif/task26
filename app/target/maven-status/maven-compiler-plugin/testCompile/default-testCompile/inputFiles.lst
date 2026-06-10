@@ -1,6 +1,8 @@
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\test\java\com\maintenance\service\DowntimeServiceTest.java
+C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\test\java\com\maintenance\consumer\PreReservationEventConsumerTest.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\test\java\com\maintenance\service\FaultServiceTest.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\test\java\com\maintenance\service\SparePartServiceTest.java
+C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\test\java\com\maintenance\service\PredictiveDispatchServiceTest.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\test\java\com\maintenance\service\AutoDispatchServiceTest.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\test\java\com\maintenance\consumer\ConsumerIdempotencyTest.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\test\java\com\maintenance\infrastructure\LocalMessageQueueTest.java
