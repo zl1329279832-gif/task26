@@ -7,6 +7,7 @@ import com.maintenance.dto.FaultReportRequest;
 import com.maintenance.entity.DowntimeRecord;
 import com.maintenance.entity.Equipment;
 import com.maintenance.entity.Fault;
+import com.maintenance.entity.SparePart;
 import com.maintenance.entity.WorkOrder;
 import com.maintenance.enums.EquipmentStatus;
 import com.maintenance.enums.EventType;
@@ -15,6 +16,7 @@ import com.maintenance.enums.WorkOrderStatus;
 import com.maintenance.infrastructure.queue.LocalMessageQueue;
 import com.maintenance.mapper.EquipmentMapper;
 import com.maintenance.mapper.FaultMapper;
+import com.maintenance.mapper.SparePartMapper;
 import com.maintenance.mapper.WorkOrderMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -37,6 +39,7 @@ public class FaultService {
     private final FaultMapper faultMapper;
     private final EquipmentMapper equipmentMapper;
     private final WorkOrderMapper workOrderMapper;
+    private final SparePartMapper sparePartMapper;
     private final LocalMessageQueue messageQueue;
     private final AutoDispatchService autoDispatchService;
     private final AuditService auditService;
@@ -45,6 +48,7 @@ public class FaultService {
     public FaultService(FaultMapper faultMapper,
                         EquipmentMapper equipmentMapper,
                         WorkOrderMapper workOrderMapper,
+                        SparePartMapper sparePartMapper,
                         LocalMessageQueue messageQueue,
                         AutoDispatchService autoDispatchService,
                         AuditService auditService,
@@ -52,6 +56,7 @@ public class FaultService {
         this.faultMapper = faultMapper;
         this.equipmentMapper = equipmentMapper;
         this.workOrderMapper = workOrderMapper;
+        this.sparePartMapper = sparePartMapper;
         this.messageQueue = messageQueue;
         this.autoDispatchService = autoDispatchService;
         this.auditService = auditService;
@@ -61,6 +66,15 @@ public class FaultService {
     /**
      * Report a fault (core method).
      * Handles duplicate detection, fault creation, work order creation, and auto-dispatch.
+     *
+     * Fixes applied:
+     * 1. Check spare part availability before dispatching. If parts are insufficient,
+     *    the work order is created but dispatch is deferred (equipment stays in FAULT status,
+     *    no downtime record is started until a technician is assigned).
+     * 2. Only start downtime AFTER successful dispatch (prevents orphaned downtime records
+     *    when no technician is available).
+     * 3. Handle dispatch failure gracefully: log, audit, and publish event with
+     *    dispatchSuccess=false so supervisors are notified.
      */
     @Transactional
     public Fault reportFault(FaultReportRequest request) {
@@ -105,7 +119,7 @@ public class FaultService {
         equipmentMapper.updateStatus(request.getEquipmentId(), EquipmentStatus.FAULT.name());
         log.info("Equipment [{}] status updated to FAULT", request.getEquipmentId());
 
-        // 4. Create work order first (before starting downtime, so we have the workOrderId)
+        // 4. Create work order
         WorkOrder workOrder = new WorkOrder();
         workOrder.setOrderCode(generateOrderCode());
         workOrder.setFaultId(fault.getId());
@@ -138,27 +152,52 @@ public class FaultService {
         log.info("Work order created: orderCode={}, faultId={}, priority={}",
                 workOrder.getOrderCode(), fault.getId(), workOrder.getPriority());
 
-        // 5. Create downtime record (now with workOrderId available)
-        DowntimeRecord downtimeRecord = downtimeService.startDowntime(
-                request.getEquipmentId(), workOrder.getId(), fault.getId());
-        log.info("Downtime started for equipment [{}], downtimeRecordId={}, workOrderId={}",
-                request.getEquipmentId(), downtimeRecord.getId(), workOrder.getId());
-
-        // 6. Dispatch based on fault level
-        DispatchResult dispatchResult;
-        if (request.getFaultLevel() >= 3) {
-            // Emergency: fault_level >= 3 (SERIOUS or CRITICAL)
-            dispatchResult = autoDispatchService.emergencyDispatch(workOrder, fault);
-            log.info("Emergency dispatch attempted for workOrder [{}], result={}",
-                    workOrder.getId(), dispatchResult.getMessage());
-        } else {
-            // Normal dispatch
-            dispatchResult = autoDispatchService.autoDispatch(workOrder, fault);
-            log.info("Auto dispatch attempted for workOrder [{}], result={}",
-                    workOrder.getId(), dispatchResult.getMessage());
+        // 5. FIX: Check spare part availability before dispatching
+        boolean partsAvailable = checkSparePartAvailability(equipment.getEquipmentType());
+        if (!partsAvailable) {
+            log.warn("Insufficient spare parts for equipment type [{}], "
+                            + "work order [{}] created but dispatch deferred",
+                    equipment.getEquipmentType(), workOrder.getId());
+            auditService.log("FAULT", "PARTS_UNAVAILABLE", "WorkOrder", workOrder.getId(), "SYSTEM",
+                    "Dispatch deferred: insufficient spare parts for equipment type="
+                            + equipment.getEquipmentType());
         }
 
-        // 7. Publish FAULT_REPORTED event
+        // 6. Dispatch based on fault level (only if parts are available or it's an emergency)
+        DispatchResult dispatchResult;
+        boolean downtimeStarted = false;
+
+        if (!partsAvailable && request.getFaultLevel() < 3) {
+            // Non-emergency with insufficient parts: defer dispatch
+            dispatchResult = DispatchResult.fail(
+                    "Dispatch deferred: insufficient spare parts for equipment type="
+                            + equipment.getEquipmentType());
+            log.info("Non-emergency dispatch deferred for workOrder [{}] due to parts shortage",
+                    workOrder.getId());
+        } else {
+            // Emergency (faultLevel >= 3) always attempts dispatch regardless of parts
+            // Normal dispatch when parts are available
+            if (request.getFaultLevel() >= 3) {
+                dispatchResult = autoDispatchService.emergencyDispatch(workOrder, fault);
+            } else {
+                dispatchResult = autoDispatchService.autoDispatch(workOrder, fault);
+            }
+
+            // 7. FIX: Only start downtime AFTER successful dispatch
+            if (dispatchResult.isSuccess()) {
+                DowntimeRecord downtimeRecord = downtimeService.startDowntime(
+                        request.getEquipmentId(), workOrder.getId(), fault.getId());
+                downtimeStarted = true;
+                log.info("Downtime started for equipment [{}], downtimeRecordId={}, workOrderId={}",
+                        request.getEquipmentId(), downtimeRecord.getId(), workOrder.getId());
+            } else {
+                log.warn("Dispatch failed for workOrder [{}], downtime not started. "
+                                + "Equipment stays in FAULT status. Result: {}",
+                        workOrder.getId(), dispatchResult.getMessage());
+            }
+        }
+
+        // 8. Publish FAULT_REPORTED event
         Map<String, Object> eventPayload = new HashMap<>();
         eventPayload.put("faultId", fault.getId());
         eventPayload.put("faultCode", fault.getFaultCode());
@@ -168,16 +207,43 @@ public class FaultService {
         eventPayload.put("orderCode", workOrder.getOrderCode());
         eventPayload.put("faultDescription", request.getFaultDescription());
         eventPayload.put("dispatchSuccess", dispatchResult.isSuccess());
+        eventPayload.put("partsAvailable", partsAvailable);
+        eventPayload.put("downtimeStarted", downtimeStarted);
         messageQueue.publish(EventType.FAULT_REPORTED.name(), eventPayload);
 
-        // 8. Audit log
+        // 9. Audit log
         auditService.log("FAULT", "REPORT", "Fault", fault.getId(), request.getReporter(),
                 "Fault reported: code=" + fault.getFaultCode()
                         + ", equipment=" + equipment.getEquipmentName()
                         + ", level=" + request.getFaultLevel()
-                        + ", dispatchResult=" + dispatchResult.getMessage());
+                        + ", dispatchResult=" + dispatchResult.getMessage()
+                        + ", partsAvailable=" + partsAvailable);
 
         return fault;
+    }
+
+    /**
+     * Check if spare parts are available for a given equipment type.
+     * Returns true if at least one applicable part has stock > 0, or if no parts
+     * are configured for this equipment type (some repairs don't need parts).
+     */
+    private boolean checkSparePartAvailability(String equipmentType) {
+        List<SparePart> applicableParts = sparePartMapper.selectByEquipmentType(equipmentType);
+        if (applicableParts == null || applicableParts.isEmpty()) {
+            // No parts configured for this equipment type - assume no parts needed
+            return true;
+        }
+
+        // Check if at least one part has stock available
+        for (SparePart part : applicableParts) {
+            if (part.getStockQuantity() > 0) {
+                return true;
+            }
+        }
+
+        // All applicable parts are out of stock
+        log.warn("All applicable spare parts out of stock for equipment type [{}]", equipmentType);
+        return false;
     }
 
     /**

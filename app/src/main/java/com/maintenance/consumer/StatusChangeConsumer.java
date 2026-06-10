@@ -3,19 +3,28 @@ package com.maintenance.consumer;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.maintenance.infrastructure.queue.EventConsumer;
 import com.maintenance.infrastructure.queue.MaintenanceEvent;
+import com.maintenance.service.AuditService;
 import com.maintenance.websocket.MaintenanceWebSocketHandler;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * Fix: Added idempotency guard via processedEvents set.
+ */
 @Component
 @Slf4j
 public class StatusChangeConsumer implements EventConsumer {
 
     private final MaintenanceWebSocketHandler wsHandler;
     private final ObjectMapper objectMapper;
+
+    /** Fix: Track processed eventIds for idempotent handling. */
+    private final Set<String> processedEvents = ConcurrentHashMap.newKeySet();
 
     public StatusChangeConsumer(MaintenanceWebSocketHandler wsHandler) {
         this.wsHandler = wsHandler;
@@ -32,6 +41,12 @@ public class StatusChangeConsumer implements EventConsumer {
 
     @Override
     public void handleEvent(MaintenanceEvent event) {
+        // FIX: Idempotency guard
+        if (!processedEvents.add(event.getEventId())) {
+            log.info("Skipping duplicate event [{}] eventId=[{}]", event.getEventType(), event.getEventId());
+            return;
+        }
+
         try {
             String eventType = event.getEventType();
             switch (eventType) {
@@ -51,6 +66,7 @@ public class StatusChangeConsumer implements EventConsumer {
                     log.warn("未处理的事件类型: {}", eventType);
             }
         } catch (Exception e) {
+            processedEvents.remove(event.getEventId());
             log.error("处理状态变更事件异常, eventId={}", event.getEventId(), e);
         }
     }
@@ -119,7 +135,6 @@ public class StatusChangeConsumer implements EventConsumer {
         notifyData.put("escalateCount", escalateCount);
         notifyData.put("message", "工单已升级, 请主管关注");
 
-        // 广播给所有在线用户（主管会收到）
         wsHandler.broadcast("WORK_ORDER_ESCALATED", notifyData);
     }
 

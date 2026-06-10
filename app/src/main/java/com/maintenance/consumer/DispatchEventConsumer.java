@@ -11,7 +11,16 @@ import org.springframework.stereotype.Component;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * Handles DISPATCH_DONE and WORK_ORDER_REASSIGNED events.
+ *
+ * Fix: Added idempotency guard via processedEvents set.
+ * If the same eventId is delivered more than once (e.g., queue retry),
+ * this consumer will skip duplicate processing.
+ */
 @Component
 @Slf4j
 public class DispatchEventConsumer implements EventConsumer {
@@ -20,6 +29,11 @@ public class DispatchEventConsumer implements EventConsumer {
     private final TechnicianService technicianService;
     private final AuditService auditService;
     private final ObjectMapper objectMapper;
+
+    /**
+     * Fix: Track processed eventIds to ensure idempotent handling.
+     */
+    private final Set<String> processedEvents = ConcurrentHashMap.newKeySet();
 
     public DispatchEventConsumer(MaintenanceWebSocketHandler wsHandler,
                                   TechnicianService technicianService,
@@ -37,6 +51,12 @@ public class DispatchEventConsumer implements EventConsumer {
 
     @Override
     public void handleEvent(MaintenanceEvent event) {
+        // FIX: Idempotency guard - skip if already processed
+        if (!processedEvents.add(event.getEventId())) {
+            log.info("Skipping duplicate event [{}] eventId=[{}]", event.getEventType(), event.getEventId());
+            return;
+        }
+
         try {
             String eventType = event.getEventType();
             if ("DISPATCH_DONE".equals(eventType)) {
@@ -45,6 +65,8 @@ public class DispatchEventConsumer implements EventConsumer {
                 handleWorkOrderReassigned(event);
             }
         } catch (Exception e) {
+            // FIX: Remove from processed set on failure so it can be retried
+            processedEvents.remove(event.getEventId());
             log.error("处理派工事件异常, eventId={}", event.getEventId(), e);
         }
     }
@@ -91,31 +113,35 @@ public class DispatchEventConsumer implements EventConsumer {
                 workOrderId, originalTechnicianId, newTechnicianId, reason);
 
         // 通知新技术员有新工单
-        Map<String, Object> newTechnicianNotify = new HashMap<>();
-        newTechnicianNotify.put("workOrderId", workOrderId);
-        newTechnicianNotify.put("orderCode", orderCode);
-        newTechnicianNotify.put("reason", reason);
-        newTechnicianNotify.put("reassigned", true);
+        if (newTechnicianId != null) {
+            Map<String, Object> newTechnicianNotify = new HashMap<>();
+            newTechnicianNotify.put("workOrderId", workOrderId);
+            newTechnicianNotify.put("orderCode", orderCode);
+            newTechnicianNotify.put("reason", reason);
+            newTechnicianNotify.put("reassigned", true);
 
-        if (wsHandler.isOnline(newTechnicianId)) {
-            wsHandler.sendToTechnician(newTechnicianId, "NEW_WORK_ORDER", newTechnicianNotify);
-            log.info("转派通知已送达新技术员, technicianId={}, workOrderId={}", newTechnicianId, workOrderId);
-        } else {
-            log.warn("转派通知未送达-新技术员离线, technicianId={}, workOrderId={}", newTechnicianId, workOrderId);
-            auditService.log("DISPATCH", "派工通知未送达-技术员离线", "WORK_ORDER", workOrderId,
-                    "SYSTEM", "新技术员" + newTechnicianId + "离线, 转派通知未送达");
+            if (wsHandler.isOnline(newTechnicianId)) {
+                wsHandler.sendToTechnician(newTechnicianId, "NEW_WORK_ORDER", newTechnicianNotify);
+                log.info("转派通知已送达新技术员, technicianId={}, workOrderId={}", newTechnicianId, workOrderId);
+            } else {
+                log.warn("转派通知未送达-新技术员离线, technicianId={}, workOrderId={}", newTechnicianId, workOrderId);
+                auditService.log("DISPATCH", "派工通知未送达-技术员离线", "WORK_ORDER", workOrderId,
+                        "SYSTEM", "新技术员" + newTechnicianId + "离线, 转派通知未送达");
+            }
         }
 
         // 通知原技术员已被转派
-        Map<String, Object> originalTechnicianNotify = new HashMap<>();
-        originalTechnicianNotify.put("workOrderId", workOrderId);
-        originalTechnicianNotify.put("orderCode", orderCode);
-        originalTechnicianNotify.put("reason", reason);
-        originalTechnicianNotify.put("newTechnicianId", newTechnicianId);
-
         if (originalTechnicianId != null) {
-            wsHandler.sendToTechnician(originalTechnicianId, "WORK_ORDER_REASSIGNED", originalTechnicianNotify);
-            log.info("转派通知已发送原技术员, technicianId={}, workOrderId={}", originalTechnicianId, workOrderId);
+            Map<String, Object> originalTechnicianNotify = new HashMap<>();
+            originalTechnicianNotify.put("workOrderId", workOrderId);
+            originalTechnicianNotify.put("orderCode", orderCode);
+            originalTechnicianNotify.put("reason", reason);
+            originalTechnicianNotify.put("newTechnicianId", newTechnicianId);
+
+            if (wsHandler.isOnline(originalTechnicianId)) {
+                wsHandler.sendToTechnician(originalTechnicianId, "WORK_ORDER_REASSIGNED", originalTechnicianNotify);
+                log.info("转派通知已发送原技术员, technicianId={}, workOrderId={}", originalTechnicianId, workOrderId);
+            }
         }
     }
 

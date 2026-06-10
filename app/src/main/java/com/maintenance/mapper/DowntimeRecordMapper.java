@@ -16,6 +16,14 @@ public interface DowntimeRecordMapper extends BaseMapper<DowntimeRecord> {
     @Select("SELECT * FROM downtime_record WHERE equipment_id = #{equipmentId} AND end_time IS NULL ORDER BY start_time DESC LIMIT 1")
     DowntimeRecord selectActiveByEquipment(@Param("equipmentId") Long equipmentId);
 
+    /**
+     * Fix: Find active downtime record matching BOTH equipmentId AND workOrderId.
+     * This prevents cross-order interference when the same equipment has multiple active work orders.
+     */
+    @Select("SELECT * FROM downtime_record WHERE equipment_id = #{equipmentId} AND work_order_id = #{workOrderId} AND end_time IS NULL ORDER BY start_time DESC LIMIT 1")
+    DowntimeRecord selectActiveByEquipmentAndWorkOrder(@Param("equipmentId") Long equipmentId,
+                                                       @Param("workOrderId") Long workOrderId);
+
     @Select("SELECT COALESCE(SUM(downtime_loss), 0) FROM downtime_record WHERE equipment_id = #{equipmentId}")
     BigDecimal sumLossByEquipment(@Param("equipmentId") Long equipmentId);
 }

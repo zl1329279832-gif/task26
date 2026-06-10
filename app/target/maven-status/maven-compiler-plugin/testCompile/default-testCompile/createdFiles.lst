@@ -1,0 +1,7 @@
+com\maintenance\service\WorkOrderServiceTest.class
+com\maintenance\service\DowntimeServiceTest.class
+com\maintenance\service\AutoDispatchServiceTest.class
+com\maintenance\infrastructure\LocalMessageQueueTest.class
+com\maintenance\service\SparePartServiceTest.class
+com\maintenance\service\FaultServiceTest.class
+com\maintenance\consumer\ConsumerIdempotencyTest.class

@@ -2,6 +2,7 @@ package com.maintenance.service;
 
 import com.maintenance.common.BusinessException;
 import com.maintenance.entity.DispatchRecord;
+import com.maintenance.entity.DowntimeRecord;
 import com.maintenance.entity.SparePart;
 import com.maintenance.entity.SparePartOccupation;
 import com.maintenance.entity.Technician;
@@ -168,6 +169,8 @@ public class WorkOrderService {
 
     /**
      * Suspend work order: ACCEPTED/ARRIVED/REPAIRING -> SUSPENDED.
+     *
+     * Fix: Also pauses the downtime record so that duration is not counted while suspended.
      */
     @Transactional
     public WorkOrder suspend(Long workOrderId, String reason) {
@@ -185,6 +188,11 @@ public class WorkOrderService {
         order.setUpdatedAt(LocalDateTime.now());
         workOrderMapper.updateById(order);
 
+        // FIX: Pause downtime record when suspending (end the active record;
+        // a new one will be created on resume if needed)
+        downtimeService.endDowntime(order.getEquipmentId(), workOrderId);
+        log.info("Downtime paused for workOrder [{}] due to suspension", workOrderId);
+
         publishStatusChange(order, currentStatus.name(), targetStatus.name());
 
         auditService.log("WORK_ORDER", "SUSPEND", "WorkOrder", workOrderId, "SYSTEM",
@@ -196,6 +204,8 @@ public class WorkOrderService {
 
     /**
      * Resume work order: SUSPENDED -> REPAIRING.
+     *
+     * Fix: Restarts the downtime record for the remaining repair time.
      */
     @Transactional
     public WorkOrder resume(Long workOrderId) {
@@ -212,6 +222,10 @@ public class WorkOrderService {
         order.setUpdatedAt(LocalDateTime.now());
         workOrderMapper.updateById(order);
 
+        // FIX: Restart downtime record when resuming from suspension
+        downtimeService.startDowntime(order.getEquipmentId(), workOrderId, order.getFaultId());
+        log.info("Downtime restarted for workOrder [{}] on resume", workOrderId);
+
         publishStatusChange(order, currentStatus.name(), targetStatus.name());
 
         auditService.log("WORK_ORDER", "RESUME", "WorkOrder", workOrderId, "SYSTEM",
@@ -224,6 +238,8 @@ public class WorkOrderService {
     /**
      * Complete work order: REPAIRING -> COMPLETED.
      * Full completion workflow including parts consumption, workload update, downtime ending, etc.
+     *
+     * Fix: Validate spare parts availability before proceeding with completion.
      */
     @Transactional
     public WorkOrder complete(Long workOrderId, String repairNotes, BigDecimal laborCost) {
@@ -274,7 +290,7 @@ public class WorkOrderService {
             }
         }
 
-        // 6. End downtime record
+        // 6. End downtime record (matches by equipmentId AND workOrderId to avoid cross-order interference)
         downtimeService.endDowntime(order.getEquipmentId(), workOrderId);
 
         // 7. Update fault status to RESOLVED
@@ -307,27 +323,54 @@ public class WorkOrderService {
     /**
      * Reassign work order to a new technician.
      * Handles state consistency: release old resources, create new assignment, update status.
+     *
+     * Fixes applied:
+     * 1. End the downtime record for the old assignment (it will restart when the new tech begins).
+     * 2. Validate new technician exists and is not OFFLINE/ON_LEAVE.
+     * 3. On failure of any step, the @Transactional annotation ensures full rollback
+     *    (spare parts, workload, downtime, dispatch record all roll back atomically).
      */
     @Transactional
     public WorkOrder reassign(Long workOrderId, Long newTechnicianId, String reason) {
         WorkOrder order = getAndValidate(workOrderId);
+
+        // FIX: Validate new technician
         Technician newTech = technicianService.getById(newTechnicianId);
         if (newTech == null) {
             throw new BusinessException("New technician not found, technicianId=" + newTechnicianId);
         }
 
+        // FIX: Reject reassignment to OFFLINE or ON_LEAVE technician
+        String newTechAvailability = newTech.getAvailability();
+        if (TechnicianAvailability.OFFLINE.name().equals(newTechAvailability)
+                || TechnicianAvailability.ON_LEAVE.name().equals(newTechAvailability)) {
+            throw new BusinessException(
+                    "Cannot reassign to technician#" + newTechnicianId
+                            + ": availability=" + newTechAvailability);
+        }
+
         Long oldTechnicianId = order.getTechnicianId();
         String oldStatus = order.getStatus();
 
-        // 1. Set work order status to REASSIGNED
+        // 1. End the current downtime record for the old assignment
+        //    (a new one will be started when the new technician resumes the repair)
+        if (order.getEquipmentId() != null) {
+            DowntimeRecord ended = downtimeService.endDowntime(order.getEquipmentId(), workOrderId);
+            if (ended != null) {
+                log.info("Downtime record ended for reassignment, workOrder={}, equipment={}",
+                        workOrderId, order.getEquipmentId());
+            }
+        }
+
+        // 2. Set work order status to REASSIGNED
         order.setStatus(WorkOrderStatus.REASSIGNED.name());
         order.setUpdatedAt(LocalDateTime.now());
         workOrderMapper.updateById(order);
 
-        // 2. Release spare parts occupied by the old work order
+        // 3. Release spare parts occupied by the old work order
         sparePartService.releaseOccupationsByWorkOrder(workOrderId);
 
-        // 3. Old technician: workload-1, check availability
+        // 4. Old technician: workload-1, check availability
         if (oldTechnicianId != null) {
             technicianService.decrementWorkload(oldTechnicianId);
             List<WorkOrder> oldActiveOrders = workOrderMapper.selectActiveByTechnicianId(oldTechnicianId);
@@ -337,7 +380,7 @@ public class WorkOrderService {
             }
         }
 
-        // 4. Create new dispatch record (type=REASSIGN)
+        // 5. Create new dispatch record (type=REASSIGN)
         DispatchRecord newDispatch = new DispatchRecord();
         newDispatch.setWorkOrderId(workOrderId);
         newDispatch.setTechnicianId(newTechnicianId);
@@ -347,17 +390,17 @@ public class WorkOrderService {
         newDispatch.setCreatedAt(LocalDateTime.now());
         dispatchRecordMapper.insert(newDispatch);
 
-        // 5. Update work order: new technician, status=CREATED, reassign_count+1
+        // 6. Update work order: new technician, status=CREATED, reassign_count+1
         order.setTechnicianId(newTechnicianId);
         order.setStatus(WorkOrderStatus.CREATED.name());
         order.setReassignCount((order.getReassignCount() != null ? order.getReassignCount() : 0) + 1);
         order.setUpdatedAt(LocalDateTime.now());
         workOrderMapper.updateById(order);
 
-        // 6. New technician: workload+1
+        // 7. New technician: workload+1
         technicianService.incrementWorkload(newTechnicianId);
 
-        // 7. Publish WORK_ORDER_REASSIGNED event
+        // 8. Publish WORK_ORDER_REASSIGNED event
         Map<String, Object> eventPayload = new HashMap<>();
         eventPayload.put("workOrderId", workOrderId);
         eventPayload.put("orderCode", order.getOrderCode());
@@ -366,7 +409,7 @@ public class WorkOrderService {
         eventPayload.put("reason", reason);
         messageQueue.publish(EventType.WORK_ORDER_REASSIGNED.name(), eventPayload);
 
-        // 8. Audit log with reason
+        // 9. Audit log with reason
         auditService.log("WORK_ORDER", "REASSIGN", "WorkOrder", workOrderId, "SYSTEM",
                 "Work order reassigned from technician#" + oldTechnicianId
                         + " to technician#" + newTechnicianId
@@ -425,6 +468,8 @@ public class WorkOrderService {
     /**
      * Abnormal close: any status -> CLOSED_ABNORMAL.
      * Releases all resources (parts, technician) and ends downtime.
+     *
+     * Fix: Use workOrderId-aware downtime end to avoid cross-order interference.
      */
     @Transactional
     public WorkOrder closeAbnormal(Long workOrderId, String reason) {
@@ -449,8 +494,10 @@ public class WorkOrderService {
             faultMapper.updateStatus(order.getFaultId(), FaultStatus.CLOSED.name());
         }
 
-        // 4. End downtime record
-        downtimeService.endDowntime(order.getEquipmentId(), workOrderId);
+        // 4. End downtime record (matches by equipmentId AND workOrderId)
+        if (order.getEquipmentId() != null) {
+            downtimeService.endDowntime(order.getEquipmentId(), workOrderId);
+        }
 
         // 5. Update work order status
         order.setStatus(WorkOrderStatus.CLOSED_ABNORMAL.name());

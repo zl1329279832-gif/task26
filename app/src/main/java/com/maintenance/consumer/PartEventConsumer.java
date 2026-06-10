@@ -10,7 +10,12 @@ import org.springframework.stereotype.Component;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * Fix: Added idempotency guard via processedEvents set.
+ */
 @Component
 @Slf4j
 public class PartEventConsumer implements EventConsumer {
@@ -18,6 +23,9 @@ public class PartEventConsumer implements EventConsumer {
     private final MaintenanceWebSocketHandler wsHandler;
     private final AuditService auditService;
     private final ObjectMapper objectMapper;
+
+    /** Fix: Track processed eventIds for idempotent handling. */
+    private final Set<String> processedEvents = ConcurrentHashMap.newKeySet();
 
     public PartEventConsumer(MaintenanceWebSocketHandler wsHandler, AuditService auditService) {
         this.wsHandler = wsHandler;
@@ -34,6 +42,12 @@ public class PartEventConsumer implements EventConsumer {
 
     @Override
     public void handleEvent(MaintenanceEvent event) {
+        // FIX: Idempotency guard
+        if (!processedEvents.add(event.getEventId())) {
+            log.info("Skipping duplicate event [{}] eventId=[{}]", event.getEventType(), event.getEventId());
+            return;
+        }
+
         try {
             String eventType = event.getEventType();
             switch (eventType) {
@@ -50,6 +64,7 @@ public class PartEventConsumer implements EventConsumer {
                     log.warn("未处理的备件事件类型: {}", eventType);
             }
         } catch (Exception e) {
+            processedEvents.remove(event.getEventId());
             log.error("处理备件事件异常, eventId={}", event.getEventId(), e);
         }
     }

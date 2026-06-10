@@ -9,13 +9,21 @@ import org.springframework.stereotype.Component;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * Fix: Added idempotency guard via processedEvents set.
+ */
 @Component
 @Slf4j
 public class EmergencyNotificationConsumer implements EventConsumer {
 
     private final MaintenanceWebSocketHandler wsHandler;
     private final ObjectMapper objectMapper;
+
+    /** Fix: Track processed eventIds for idempotent handling. */
+    private final Set<String> processedEvents = ConcurrentHashMap.newKeySet();
 
     public EmergencyNotificationConsumer(MaintenanceWebSocketHandler wsHandler) {
         this.wsHandler = wsHandler;
@@ -29,6 +37,12 @@ public class EmergencyNotificationConsumer implements EventConsumer {
 
     @Override
     public void handleEvent(MaintenanceEvent event) {
+        // FIX: Idempotency guard
+        if (!processedEvents.add(event.getEventId())) {
+            log.info("Skipping duplicate event [{}] eventId=[{}]", event.getEventType(), event.getEventId());
+            return;
+        }
+
         try {
             String eventType = event.getEventType();
             if ("EMERGENCY_ALERT".equals(eventType)) {
@@ -37,6 +51,7 @@ public class EmergencyNotificationConsumer implements EventConsumer {
                 handleFaultReported(event);
             }
         } catch (Exception e) {
+            processedEvents.remove(event.getEventId());
             log.error("处理紧急通知事件异常, eventId={}", event.getEventId(), e);
         }
     }

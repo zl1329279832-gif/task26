@@ -26,6 +26,8 @@ import java.util.concurrent.TimeUnit;
 public class SparePartService {
 
     private static final String PART_LOCK_PREFIX = "part:lock:";
+    private static final int LOCK_RETRY_MAX = 3;
+    private static final long LOCK_RETRY_DELAY_MS = 200;
 
     private final SparePartMapper sparePartMapper;
     private final SparePartOccupationMapper sparePartOccupationMapper;
@@ -141,6 +143,10 @@ public class SparePartService {
     /**
      * Release all OCCUPIED spare parts for a work order.
      * Returns occupied quantity back to stock for each part.
+     *
+     * Fix: Uses retry logic for lock acquisition instead of silently skipping.
+     * If lock cannot be acquired after retries, throws BusinessException to trigger
+     * transactional rollback (preventing partial release inconsistency).
      */
     @Transactional
     public void releaseOccupationsByWorkOrder(Long workOrderId) {
@@ -157,11 +163,15 @@ public class SparePartService {
             String lockKey = PART_LOCK_PREFIX + occupation.getPartId();
             boolean locked = false;
             try {
-                // 2. Acquire lock for each part
-                locked = tryLock(lockKey, 10);
+                // FIX: Retry lock acquisition instead of silently skipping
+                locked = tryLockWithRetry(lockKey, 10, LOCK_RETRY_MAX, LOCK_RETRY_DELAY_MS);
                 if (!locked) {
-                    log.warn("Failed to acquire lock for part [{}], skipping", occupation.getPartId());
-                    continue;
+                    // FIX: Throw exception instead of silently continuing
+                    // This triggers @Transactional rollback, keeping all state consistent
+                    throw new BusinessException(
+                            "Failed to acquire part lock after " + LOCK_RETRY_MAX
+                                    + " retries, partId=" + occupation.getPartId()
+                                    + ", workOrderId=" + workOrderId);
                 }
 
                 // 3. Return stock via increaseStock
@@ -248,6 +258,28 @@ public class SparePartService {
             log.error("Redis lock acquire failed for key [{}]: {}", key, e.getMessage(), e);
             return false;
         }
+    }
+
+    /**
+     * Try to acquire a lock with retry logic.
+     * Retries up to maxRetries times with delayMs between attempts.
+     */
+    private boolean tryLockWithRetry(String key, long expireSeconds, int maxRetries, long delayMs) {
+        for (int attempt = 1; attempt <= maxRetries; attempt++) {
+            if (tryLock(key, expireSeconds)) {
+                return true;
+            }
+            log.warn("Lock acquire attempt {}/{} failed for key [{}], retrying in {}ms",
+                    attempt, maxRetries, key, delayMs);
+            try {
+                Thread.sleep(delayMs);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                log.warn("Interrupted during lock retry for key [{}]", key);
+                return false;
+            }
+        }
+        return false;
     }
 
     /**
