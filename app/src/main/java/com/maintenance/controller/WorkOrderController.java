@@ -111,4 +111,11 @@ public class WorkOrderController {
         WorkOrder workOrder = workOrderService.closeAbnormal(id, request.getReason());
         return Result.ok(workOrder);
     }
+
+    @PostMapping("/{id}/rework")
+    public Result<WorkOrder> rework(@PathVariable Long id, @RequestBody SuspendRequest request) {
+        log.info("返工工单, workOrderId={}, reason={}", id, request.getReason());
+        WorkOrder workOrder = workOrderService.rework(id, request.getReason());
+        return Result.ok(workOrder);
+    }
 }

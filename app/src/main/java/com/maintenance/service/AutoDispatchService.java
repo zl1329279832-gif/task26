@@ -38,6 +38,7 @@ public class AutoDispatchService {
     private final LocalMessageQueue messageQueue;
     private final AuditService auditService;
     private final TechnicianService technicianService;
+    private final SparePartService sparePartService;
 
     public AutoDispatchService(TechnicianMapper technicianMapper,
                                TechnicianSkillMapper technicianSkillMapper,
@@ -45,7 +46,8 @@ public class AutoDispatchService {
                                DispatchRecordMapper dispatchRecordMapper,
                                LocalMessageQueue messageQueue,
                                AuditService auditService,
-                               TechnicianService technicianService) {
+                               TechnicianService technicianService,
+                               SparePartService sparePartService) {
         this.technicianMapper = technicianMapper;
         this.technicianSkillMapper = technicianSkillMapper;
         this.workOrderMapper = workOrderMapper;
@@ -53,25 +55,60 @@ public class AutoDispatchService {
         this.messageQueue = messageQueue;
         this.auditService = auditService;
         this.technicianService = technicianService;
+        this.sparePartService = sparePartService;
     }
 
     /**
      * Core auto-dispatch algorithm.
-     * Scores all technicians and selects the best one for the work order.
+     * Hard prerequisites: technician must be online, have matching skill, and certified fault level.
+     * Then scores qualified technicians and selects the best one.
      */
     @Transactional
     public com.maintenance.dto.DispatchResult autoDispatch(WorkOrder workOrder, Fault fault) {
         // 1. Get all technicians
         List<Technician> allTechnicians = technicianMapper.selectList(null);
         if (allTechnicians == null || allTechnicians.isEmpty()) {
+            log.warn("No technicians in system for workOrder [{}]", workOrder.getId());
             return com.maintenance.dto.DispatchResult.fail("No technicians available");
         }
 
-        // 2. Calculate score for each technician
+        // 2. Filter and score: only technicians passing hard prerequisites
         List<TechnicianScore> scoredTechnicians = new ArrayList<>();
         for (Technician tech : allTechnicians) {
-            BigDecimal score = calculateScore(tech, workOrder, fault);
+            // Hard prerequisite 1: must be AVAILABLE or BUSY (not OFFLINE/ON_LEAVE)
+            String availability = tech.getAvailability();
+            if (TechnicianAvailability.OFFLINE.name().equals(availability)
+                    || TechnicianAvailability.ON_LEAVE.name().equals(availability)) {
+                log.debug("Technician [{}] skipped: availability={}", tech.getId(), availability);
+                continue;
+            }
+
+            // Hard prerequisite 2: must have matching skill for equipment type
+            TechnicianSkill skill = technicianSkillMapper.selectByTechnicianAndType(
+                    tech.getId(), fault.getEquipmentType());
+            if (skill == null) {
+                log.debug("Technician [{}] skipped: no skill for equipmentType={}",
+                        tech.getId(), fault.getEquipmentType());
+                continue;
+            }
+
+            // Hard prerequisite 3: certified fault level must cover the fault
+            if (skill.getCertifiedFaultLevel() == null
+                    || skill.getCertifiedFaultLevel() < fault.getFaultLevel()) {
+                log.debug("Technician [{}] skipped: certifiedFaultLevel={} < faultLevel={}",
+                        tech.getId(), skill.getCertifiedFaultLevel(), fault.getFaultLevel());
+                continue;
+            }
+
+            BigDecimal score = calculateScore(tech, skill, workOrder, fault);
             scoredTechnicians.add(new TechnicianScore(tech, score));
+        }
+
+        if (scoredTechnicians.isEmpty()) {
+            log.warn("No qualified technician found for workOrder [{}], equipmentType={}, faultLevel={}",
+                    workOrder.getId(), fault.getEquipmentType(), fault.getFaultLevel());
+            return com.maintenance.dto.DispatchResult.fail(
+                    "No qualified technician: none online with matching skill and certification");
         }
 
         // 3. Sort by score descending
@@ -82,7 +119,8 @@ public class AutoDispatchService {
         if (best.score().compareTo(BigDecimal.valueOf(30)) < 0) {
             log.warn("No qualified technician found for workOrder [{}], best score={}",
                     workOrder.getId(), best.score());
-            return com.maintenance.dto.DispatchResult.fail("No qualified technician available, best score=" + best.score());
+            return com.maintenance.dto.DispatchResult.fail(
+                    "No qualified technician available, best score=" + best.score());
         }
 
         Technician selectedTech = best.technician();
@@ -134,6 +172,7 @@ public class AutoDispatchService {
 
     /**
      * Emergency dispatch: tries normal auto-dispatch first, then preempts a low-priority order if needed.
+     * Preemption includes releasing spare parts on the preempted order and proper status transitions.
      */
     @Transactional
     public com.maintenance.dto.DispatchResult emergencyDispatch(WorkOrder workOrder, Fault fault) {
@@ -146,40 +185,86 @@ public class AutoDispatchService {
         log.warn("Normal auto dispatch failed for emergency workOrder [{}], attempting preemption",
                 workOrder.getId());
 
-        // 2. No one available - find a technician from a low-priority non-emergency order
-        List<Technician> candidates = findEmergencyCandidate(workOrder);
-        if (candidates.isEmpty()) {
-            return com.maintenance.dto.DispatchResult.fail(
-                    "Emergency dispatch failed: no technician can be reassigned");
-        }
-
-        Technician preemptedTech = candidates.get(0);
-
-        // 3. Find the lowest-priority active work order assigned to this technician
-        List<WorkOrder> activeOrders = workOrderMapper.selectActiveByTechnicianId(preemptedTech.getId());
+        // 2. Find a technician from a low-priority non-emergency order who has matching skills
+        List<Technician> allTechnicians = technicianMapper.selectList(null);
+        Technician preemptedTech = null;
         WorkOrder preemptedOrder = null;
-        for (WorkOrder activeOrder : activeOrders) {
-            if (activeOrder.getPriority() < 4 && !activeOrder.getId().equals(workOrder.getId())) {
-                if (preemptedOrder == null || activeOrder.getPriority() < preemptedOrder.getPriority()) {
-                    preemptedOrder = activeOrder;
+
+        for (Technician tech : allTechnicians) {
+            // Skip offline/on_leave technicians
+            String availability = tech.getAvailability();
+            if (TechnicianAvailability.OFFLINE.name().equals(availability)
+                    || TechnicianAvailability.ON_LEAVE.name().equals(availability)) {
+                continue;
+            }
+
+            // Must have matching skill for the emergency order's equipment type
+            TechnicianSkill skill = technicianSkillMapper.selectByTechnicianAndType(
+                    tech.getId(), fault.getEquipmentType());
+            if (skill == null || skill.getCertifiedFaultLevel() == null
+                    || skill.getCertifiedFaultLevel() < fault.getFaultLevel()) {
+                continue;
+            }
+
+            // Find this technician's lowest-priority active (non-suspended) order
+            List<WorkOrder> activeOrders = workOrderMapper.selectActiveByTechnicianId(tech.getId());
+            if (activeOrders == null || activeOrders.isEmpty()) {
+                continue;
+            }
+
+            for (WorkOrder activeOrder : activeOrders) {
+                // Skip suspended orders, the emergency order itself, and max-priority orders
+                if (WorkOrderStatus.SUSPENDED.name().equals(activeOrder.getStatus())
+                        || activeOrder.getId().equals(workOrder.getId())
+                        || activeOrder.getPriority() >= 4) {
+                    continue;
+                }
+                // Must be lower priority than the emergency order
+                if (activeOrder.getPriority() < workOrder.getPriority()) {
+                    if (preemptedOrder == null || activeOrder.getPriority() < preemptedOrder.getPriority()) {
+                        preemptedTech = tech;
+                        preemptedOrder = activeOrder;
+                    }
                 }
             }
         }
 
-        if (preemptedOrder == null) {
+        if (preemptedTech == null || preemptedOrder == null) {
+            log.warn("Emergency dispatch failed for workOrder [{}]: no preemptable order found",
+                    workOrder.getId());
+            // Publish DISPATCH_FAILED event
+            Map<String, Object> failPayload = new HashMap<>();
+            failPayload.put("workOrderId", workOrder.getId());
+            failPayload.put("reason", "Emergency dispatch failed: no preemptable order with qualified technician");
+            messageQueue.publish(EventType.DISPATCH_FAILED.name(), failPayload);
+
             return com.maintenance.dto.DispatchResult.fail(
-                    "Emergency dispatch failed: no preemptable order found");
+                    "Emergency dispatch failed: no preemptable order with qualified technician");
         }
 
-        // 4. Suspend the preempted order
+        // 3. Suspend the preempted order
         String oldStatus = preemptedOrder.getStatus();
         preemptedOrder.setStatus(WorkOrderStatus.SUSPENDED.name());
         preemptedOrder.setSuspendedAt(LocalDateTime.now());
+        preemptedOrder.setUpdatedAt(LocalDateTime.now());
         workOrderMapper.updateById(preemptedOrder);
-        log.info("WorkOrder [{}] suspended to make room for emergency order [{}]",
-                preemptedOrder.getId(), workOrder.getId());
+        log.info("WorkOrder [{}] suspended (was {}) to make room for emergency order [{}]",
+                preemptedOrder.getId(), oldStatus, workOrder.getId());
 
-        // 5. Assign the emergency order to the freed technician
+        // 4. Release spare parts occupied by the preempted order
+        sparePartService.releaseOccupationsByWorkOrder(preemptedOrder.getId());
+
+        // 5. Publish STATUS_CHANGED for the preempted order
+        Map<String, Object> suspendPayload = new HashMap<>();
+        suspendPayload.put("workOrderId", preemptedOrder.getId());
+        suspendPayload.put("orderCode", preemptedOrder.getOrderCode());
+        suspendPayload.put("oldStatus", oldStatus);
+        suspendPayload.put("newStatus", WorkOrderStatus.SUSPENDED.name());
+        suspendPayload.put("technicianId", preemptedTech.getId());
+        suspendPayload.put("equipmentId", preemptedOrder.getEquipmentId());
+        messageQueue.publish(EventType.STATUS_CHANGED.name(), suspendPayload);
+
+        // 6. Assign the emergency order to the freed technician
         DispatchRecord dispatchRecord = new DispatchRecord();
         dispatchRecord.setWorkOrderId(workOrder.getId());
         dispatchRecord.setTechnicianId(preemptedTech.getId());
@@ -193,19 +278,30 @@ public class AutoDispatchService {
         workOrder.setStatus(WorkOrderStatus.CREATED.name());
         workOrderMapper.updateById(workOrder);
 
-        // 6. Publish EMERGENCY_ALERT event
-        Map<String, Object> eventPayload = new HashMap<>();
-        eventPayload.put("emergencyWorkOrderId", workOrder.getId());
-        eventPayload.put("preemptedWorkOrderId", preemptedOrder.getId());
-        eventPayload.put("technicianId", preemptedTech.getId());
-        eventPayload.put("technicianName", preemptedTech.getName());
-        eventPayload.put("reason", "Emergency order preemption");
-        messageQueue.publish(EventType.EMERGENCY_ALERT.name(), eventPayload);
+        // 7. Publish DISPATCH_DONE event for the emergency order
+        Map<String, Object> dispatchPayload = new HashMap<>();
+        dispatchPayload.put("workOrderId", workOrder.getId());
+        dispatchPayload.put("orderCode", workOrder.getOrderCode());
+        dispatchPayload.put("technicianId", preemptedTech.getId());
+        dispatchPayload.put("technicianName", preemptedTech.getName());
+        dispatchPayload.put("dispatchScore", BigDecimal.valueOf(100));
+        dispatchPayload.put("dispatchType", DispatchType.AUTO.name());
+        messageQueue.publish(EventType.DISPATCH_DONE.name(), dispatchPayload);
 
-        // 7. Audit log
+        // 8. Publish EMERGENCY_ALERT event
+        Map<String, Object> alertPayload = new HashMap<>();
+        alertPayload.put("emergencyWorkOrderId", workOrder.getId());
+        alertPayload.put("preemptedWorkOrderId", preemptedOrder.getId());
+        alertPayload.put("technicianId", preemptedTech.getId());
+        alertPayload.put("technicianName", preemptedTech.getName());
+        alertPayload.put("reason", "Emergency order preemption");
+        messageQueue.publish(EventType.EMERGENCY_ALERT.name(), alertPayload);
+
+        // 9. Audit log
         auditService.log("DISPATCH", "EMERGENCY_DISPATCH", "WorkOrder", workOrder.getId(), "SYSTEM",
                 "Emergency dispatch: preempted workOrder=" + preemptedOrder.getId()
-                        + ", technician=" + preemptedTech.getName());
+                        + ", technician=" + preemptedTech.getName()
+                        + ", released spare parts on preempted order");
 
         return com.maintenance.dto.DispatchResult.success(
                 workOrder.getId(),
@@ -217,38 +313,22 @@ public class AutoDispatchService {
     }
 
     /**
-     * Calculate dispatch score for a single technician.
-     * Total possible: 0-125 points across 5 dimensions.
+     * Calculate dispatch score for a qualified technician (already passed hard prerequisites).
+     * Total possible: 0-80 points across 4 soft dimensions (skill proficiency, availability, workload, performance).
      */
-    private BigDecimal calculateScore(Technician tech, WorkOrder order, Fault fault) {
+    private BigDecimal calculateScore(Technician tech, TechnicianSkill skill,
+                                       WorkOrder order, Fault fault) {
         BigDecimal totalScore = BigDecimal.ZERO;
 
-        // a. Skill match (0-30 points)
-        BigDecimal skillScore = BigDecimal.ZERO;
-        TechnicianSkill skill = technicianSkillMapper.selectByTechnicianAndType(
-                tech.getId(), fault.getEquipmentType());
-        if (skill != null) {
-            // Matching equipment_type: +20
-            skillScore = skillScore.add(BigDecimal.valueOf(20));
-            // Proficiency bonus: +2 per level, max +10 (level 5)
-            int proficiencyBonus = Math.min(skill.getProficiency() * 2, 10);
-            skillScore = skillScore.add(BigDecimal.valueOf(proficiencyBonus));
-        }
+        // a. Skill proficiency (0-30 points) - skill match is already guaranteed
+        BigDecimal skillScore = BigDecimal.valueOf(20);
+        int proficiencyBonus = Math.min(skill.getProficiency() * 2, 10);
+        skillScore = skillScore.add(BigDecimal.valueOf(proficiencyBonus));
         totalScore = totalScore.add(skillScore);
 
-        // b. Fault level certification (0-20 points)
-        BigDecimal certScore = BigDecimal.ZERO;
-        if (skill != null && skill.getCertifiedFaultLevel() != null) {
-            int certLevel = skill.getCertifiedFaultLevel();
-            int faultLevel = fault.getFaultLevel();
-            if (certLevel >= faultLevel) {
-                certScore = BigDecimal.valueOf(20);
-            } else {
-                // -10 for each level below
-                int deficit = faultLevel - certLevel;
-                certScore = BigDecimal.valueOf(Math.max(20 - deficit * 10, 0));
-            }
-        }
+        // b. Certification margin (0-20 points) - certification is already guaranteed >= faultLevel
+        int certMargin = skill.getCertifiedFaultLevel() - fault.getFaultLevel();
+        BigDecimal certScore = BigDecimal.valueOf(Math.min(20, 10 + certMargin * 5));
         totalScore = totalScore.add(certScore);
 
         // c. Availability (0-25 points)
@@ -259,7 +339,6 @@ public class AutoDispatchService {
         } else if (TechnicianAvailability.BUSY.name().equals(availability)) {
             availScore = BigDecimal.valueOf(10);
         }
-        // OFFLINE and ON_LEAVE get 0
         totalScore = totalScore.add(availScore);
 
         // d. Current workload (0-25 points): 25 - current_workload * 5, minimum 0
@@ -276,18 +355,13 @@ public class AutoDispatchService {
 
     /**
      * Calculate historical performance score based on completed orders.
-     * More completed orders with shorter average completion time = higher score.
      */
     private BigDecimal calculatePerformanceScore(Technician tech) {
         int completedCount = workOrderMapper.countByTechnicianAndStatus(
                 tech.getId(), WorkOrderStatus.COMPLETED.name());
         if (completedCount == 0) {
-            // New technician gets a moderate score
             return BigDecimal.valueOf(15);
         }
-
-        // Score based on completion count: up to 25 points
-        // 1-5 orders: 10 points, 6-10: 15, 11-20: 20, 20+: 25
         if (completedCount >= 20) {
             return BigDecimal.valueOf(25);
         } else if (completedCount >= 11) {
@@ -299,33 +373,5 @@ public class AutoDispatchService {
         }
     }
 
-    /**
-     * Find technicians who could be reassigned from low-priority orders for emergency dispatch.
-     */
-    private List<Technician> findEmergencyCandidate(WorkOrder emergencyOrder) {
-        List<Technician> allTechnicians = technicianMapper.selectList(null);
-        List<Technician> candidates = new ArrayList<>();
-
-        for (Technician tech : allTechnicians) {
-            // Only consider technicians who are currently assigned to active orders
-            List<WorkOrder> activeOrders = workOrderMapper.selectActiveByTechnicianId(tech.getId());
-            if (activeOrders != null && !activeOrders.isEmpty()) {
-                // Check if any active order has lower priority than the emergency order
-                for (WorkOrder activeOrder : activeOrders) {
-                    if (activeOrder.getPriority() < emergencyOrder.getPriority()
-                            && !WorkOrderStatus.SUSPENDED.name().equals(activeOrder.getStatus())) {
-                        candidates.add(tech);
-                        break;
-                    }
-                }
-            }
-        }
-
-        return candidates;
-    }
-
-    /**
-     * Internal record to hold technician and their calculated score.
-     */
     private record TechnicianScore(Technician technician, BigDecimal score) {}
 }

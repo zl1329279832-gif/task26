@@ -35,11 +35,6 @@ public class DowntimeService {
     /**
      * Start a downtime record for an equipment.
      * Creates a new downtime record with start_time=now and updates equipment status to MAINTENANCE.
-     *
-     * @param equipmentId the equipment ID
-     * @param workOrderId the associated work order ID
-     * @param faultId     the associated fault ID
-     * @return the created downtime record
      */
     @Transactional
     public DowntimeRecord startDowntime(Long equipmentId, Long workOrderId, Long faultId) {
@@ -48,7 +43,14 @@ public class DowntimeService {
             throw new BusinessException("设备不存在, equipmentId=" + equipmentId);
         }
 
-        // Create downtime record
+        // Check if there's already an active downtime for this work order to avoid duplicates
+        DowntimeRecord existing = downtimeRecordMapper.selectActiveByEquipmentAndWorkOrder(equipmentId, workOrderId);
+        if (existing != null) {
+            log.info("Active downtime already exists for equipment [{}] workOrder [{}], downtimeId={}",
+                    equipmentId, workOrderId, existing.getId());
+            return existing;
+        }
+
         DowntimeRecord record = new DowntimeRecord();
         record.setEquipmentId(equipmentId);
         record.setWorkOrderId(workOrderId);
@@ -60,11 +62,8 @@ public class DowntimeService {
         log.info("Downtime started for equipment [{}], workOrder [{}], downtimeRecord [{}]",
                 equipmentId, workOrderId, record.getId());
 
-        // Update equipment status to MAINTENANCE
         equipmentMapper.updateStatus(equipmentId, EquipmentStatus.MAINTENANCE.name());
-        log.info("Equipment [{}] status updated to MAINTENANCE", equipmentId);
 
-        // Record audit log
         auditService.log("DOWNTIME", "START", "Equipment", equipmentId, "SYSTEM",
                 "设备停机开始, 工单ID=" + workOrderId + ", 故障ID=" + faultId);
 
@@ -72,21 +71,21 @@ public class DowntimeService {
     }
 
     /**
-     * End the active downtime record for an equipment.
-     * Sets end_time=now, calculates duration_minutes and downtime_loss,
-     * and updates equipment status to RUNNING.
-     *
-     * @param equipmentId the equipment ID
-     * @param workOrderId the associated work order ID
-     * @return the updated downtime record
+     * End the active downtime record for an equipment and work order.
+     * Uses both equipmentId and workOrderId for precise matching to avoid ending wrong records.
      */
     @Transactional
     public DowntimeRecord endDowntime(Long equipmentId, Long workOrderId) {
-        // Find the active downtime record (end_time IS NULL)
-        DowntimeRecord record = downtimeRecordMapper.selectActiveByEquipment(equipmentId);
+        // Find by both equipmentId and workOrderId for precision
+        DowntimeRecord record = downtimeRecordMapper.selectActiveByEquipmentAndWorkOrder(equipmentId, workOrderId);
         if (record == null) {
-            log.warn("No active downtime record found for equipment [{}]", equipmentId);
-            return null;
+            // Fallback to equipment-only search for backward compatibility
+            record = downtimeRecordMapper.selectActiveByEquipment(equipmentId);
+            if (record == null) {
+                log.warn("No active downtime record found for equipment [{}] workOrder [{}]",
+                        equipmentId, workOrderId);
+                return null;
+            }
         }
 
         Equipment equipment = equipmentMapper.selectById(equipmentId);
@@ -97,24 +96,27 @@ public class DowntimeService {
         LocalDateTime endTime = LocalDateTime.now();
         record.setEndTime(endTime);
 
-        // Calculate duration in minutes
         Duration duration = Duration.between(record.getStartTime(), endTime);
         long durationMinutes = duration.toMinutes();
         record.setDurationMinutes((int) durationMinutes);
 
-        // Calculate downtime loss based on equipment's downtime_cost_per_hour
         BigDecimal downtimeLoss = calculateDowntimeLoss(equipment.getDowntimeCostPerHour(), durationMinutes);
         record.setDowntimeLoss(downtimeLoss);
 
         downtimeRecordMapper.updateById(record);
-        log.info("Downtime ended for equipment [{}], duration={}min, loss={}",
-                equipmentId, durationMinutes, downtimeLoss);
+        log.info("Downtime ended for equipment [{}], workOrder [{}], duration={}min, loss={}",
+                equipmentId, workOrderId, durationMinutes, downtimeLoss);
 
-        // Update equipment status to RUNNING
-        equipmentMapper.updateStatus(equipmentId, EquipmentStatus.RUNNING.name());
-        log.info("Equipment [{}] status updated to RUNNING", equipmentId);
+        // Only set equipment to RUNNING if no other active downtime records exist
+        DowntimeRecord otherActive = downtimeRecordMapper.selectActiveByEquipment(equipmentId);
+        if (otherActive == null) {
+            equipmentMapper.updateStatus(equipmentId, EquipmentStatus.RUNNING.name());
+            log.info("Equipment [{}] status updated to RUNNING (no more active downtimes)", equipmentId);
+        } else {
+            log.info("Equipment [{}] still has active downtime record [{}], keeping MAINTENANCE status",
+                    equipmentId, otherActive.getId());
+        }
 
-        // Record audit log
         auditService.log("DOWNTIME", "END", "Equipment", equipmentId, "SYSTEM",
                 "设备停机结束, 工单ID=" + workOrderId + ", 停机时长=" + durationMinutes + "分钟, 损失=" + downtimeLoss);
 
@@ -123,9 +125,6 @@ public class DowntimeService {
 
     /**
      * Calculate total downtime loss for an equipment.
-     *
-     * @param equipmentId the equipment ID
-     * @return total downtime loss
      */
     public BigDecimal calculateLoss(Long equipmentId, LocalDateTime start, LocalDateTime end) {
         return downtimeRecordMapper.sumLossByEquipment(equipmentId);
@@ -133,9 +132,6 @@ public class DowntimeService {
 
     /**
      * Get all downtime records for an equipment.
-     *
-     * @param equipmentId the equipment ID
-     * @return list of downtime records ordered by start_time DESC
      */
     public List<DowntimeRecord> getByEquipment(Long equipmentId) {
         return downtimeRecordMapper.selectByEquipmentId(equipmentId);
@@ -143,7 +139,6 @@ public class DowntimeService {
 
     /**
      * Calculate downtime loss based on hourly cost and duration in minutes.
-     * loss = downtime_cost_per_hour * (duration_minutes / 60.0)
      */
     private BigDecimal calculateDowntimeLoss(BigDecimal costPerHour, long durationMinutes) {
         if (costPerHour == null || costPerHour.compareTo(BigDecimal.ZERO) == 0) {

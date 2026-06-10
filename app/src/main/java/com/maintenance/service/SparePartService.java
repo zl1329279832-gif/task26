@@ -4,11 +4,14 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.maintenance.common.BusinessException;
 import com.maintenance.entity.SparePart;
 import com.maintenance.entity.SparePartOccupation;
+import com.maintenance.entity.WorkOrder;
 import com.maintenance.enums.EventType;
 import com.maintenance.enums.OccupationStatus;
+import com.maintenance.enums.WorkOrderStatus;
 import com.maintenance.infrastructure.queue.LocalMessageQueue;
 import com.maintenance.mapper.SparePartMapper;
 import com.maintenance.mapper.SparePartOccupationMapper;
+import com.maintenance.mapper.WorkOrderMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
@@ -19,6 +22,7 @@ import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 @Slf4j
@@ -27,19 +31,28 @@ public class SparePartService {
 
     private static final String PART_LOCK_PREFIX = "part:lock:";
 
+    private static final Set<String> ALLOWED_OCCUPY_STATUSES = Set.of(
+            WorkOrderStatus.ACCEPTED.name(),
+            WorkOrderStatus.ARRIVED.name(),
+            WorkOrderStatus.REPAIRING.name()
+    );
+
     private final SparePartMapper sparePartMapper;
     private final SparePartOccupationMapper sparePartOccupationMapper;
+    private final WorkOrderMapper workOrderMapper;
     private final RedisTemplate<String, Object> redisTemplate;
     private final LocalMessageQueue messageQueue;
     private final AuditService auditService;
 
     public SparePartService(SparePartMapper sparePartMapper,
                             SparePartOccupationMapper sparePartOccupationMapper,
+                            WorkOrderMapper workOrderMapper,
                             RedisTemplate<String, Object> redisTemplate,
                             LocalMessageQueue messageQueue,
                             AuditService auditService) {
         this.sparePartMapper = sparePartMapper;
         this.sparePartOccupationMapper = sparePartOccupationMapper;
+        this.workOrderMapper = workOrderMapper;
         this.redisTemplate = redisTemplate;
         this.messageQueue = messageQueue;
         this.auditService = auditService;
@@ -51,6 +64,16 @@ public class SparePartService {
      */
     @Transactional
     public SparePartOccupation occupyPart(Long workOrderId, Long partId, int quantity) {
+        // Validate work order is in a state that allows part occupation
+        WorkOrder workOrder = workOrderMapper.selectById(workOrderId);
+        if (workOrder == null) {
+            throw new BusinessException("Work order not found, workOrderId=" + workOrderId);
+        }
+        if (!ALLOWED_OCCUPY_STATUSES.contains(workOrder.getStatus())) {
+            throw new BusinessException("Cannot occupy parts: work order status=" + workOrder.getStatus()
+                    + " (must be ACCEPTED/ARRIVED/REPAIRING)");
+        }
+
         String lockKey = PART_LOCK_PREFIX + partId;
         boolean locked = false;
         try {

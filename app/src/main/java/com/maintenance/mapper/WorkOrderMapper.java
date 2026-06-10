@@ -16,7 +16,7 @@ public interface WorkOrderMapper extends BaseMapper<WorkOrder> {
     @Select("SELECT * FROM work_order WHERE technician_id = #{technicianId} ORDER BY created_at DESC")
     List<WorkOrder> selectByTechnicianId(@Param("technicianId") Long technicianId);
 
-    @Select("SELECT * FROM work_order WHERE technician_id = #{technicianId} AND status NOT IN ('COMPLETED', 'REASSIGNED', 'CLOSED_ABNORMAL') ORDER BY created_at DESC")
+    @Select("SELECT * FROM work_order WHERE technician_id = #{technicianId} AND status NOT IN ('COMPLETED', 'REASSIGNED', 'CLOSED_ABNORMAL', 'REWORK') ORDER BY created_at DESC")
     List<WorkOrder> selectActiveByTechnicianId(@Param("technicianId") Long technicianId);
 
     @Update("UPDATE work_order SET status = #{status}, updated_at = NOW() WHERE id = #{id}")

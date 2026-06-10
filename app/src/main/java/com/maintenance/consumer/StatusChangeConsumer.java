@@ -27,7 +27,10 @@ public class StatusChangeConsumer implements EventConsumer {
         return "STATUS_CHANGED".equals(eventType)
                 || "REPAIR_COMPLETED".equals(eventType)
                 || "WORK_ORDER_ESCALATED".equals(eventType)
-                || "WORK_ORDER_CLOSED".equals(eventType);
+                || "WORK_ORDER_CLOSED".equals(eventType)
+                || "REASSIGN_FAILED".equals(eventType)
+                || "WORK_ORDER_REWORK".equals(eventType)
+                || "DISPATCH_FAILED".equals(eventType);
     }
 
     @Override
@@ -46,6 +49,15 @@ public class StatusChangeConsumer implements EventConsumer {
                     break;
                 case "WORK_ORDER_CLOSED":
                     handleWorkOrderClosed(event);
+                    break;
+                case "REASSIGN_FAILED":
+                    handleReassignFailed(event);
+                    break;
+                case "WORK_ORDER_REWORK":
+                    handleWorkOrderRework(event);
+                    break;
+                case "DISPATCH_FAILED":
+                    handleDispatchFailed(event);
                     break;
                 default:
                     log.warn("未处理的事件类型: {}", eventType);
@@ -140,13 +152,74 @@ public class StatusChangeConsumer implements EventConsumer {
         notifyData.put("reason", reason);
         notifyData.put("message", "工单已异常关闭");
 
-        // 通知相关技术员
         if (technicianId != null) {
             wsHandler.sendToTechnician(technicianId, "WORK_ORDER_CLOSED", notifyData);
         }
 
-        // 广播关闭通知
         wsHandler.broadcast("WORK_ORDER_CLOSED", notifyData);
+    }
+
+    private void handleReassignFailed(MaintenanceEvent event) throws Exception {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> payload = objectMapper.readValue(event.getPayload(), Map.class);
+
+        Long workOrderId = getLongValue(payload, "workOrderId");
+        Long oldTechnicianId = getLongValue(payload, "oldTechnicianId");
+        Long newTechnicianId = getLongValue(payload, "newTechnicianId");
+        String reason = (String) payload.get("reason");
+
+        log.warn("工单转派失败, workOrderId={}, oldTech={}, newTech={}, reason={}",
+                workOrderId, oldTechnicianId, newTechnicianId, reason);
+
+        Map<String, Object> notifyData = new HashMap<>();
+        notifyData.put("workOrderId", workOrderId);
+        notifyData.put("oldTechnicianId", oldTechnicianId);
+        notifyData.put("newTechnicianId", newTechnicianId);
+        notifyData.put("reason", reason);
+        notifyData.put("message", "工单转派失败: " + reason);
+
+        if (oldTechnicianId != null) {
+            wsHandler.sendToTechnician(oldTechnicianId, "REASSIGN_FAILED", notifyData);
+        }
+        wsHandler.broadcast("REASSIGN_FAILED", notifyData);
+    }
+
+    private void handleWorkOrderRework(MaintenanceEvent event) throws Exception {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> payload = objectMapper.readValue(event.getPayload(), Map.class);
+
+        Long originalWorkOrderId = getLongValue(payload, "originalWorkOrderId");
+        Long newWorkOrderId = getLongValue(payload, "newWorkOrderId");
+        String newOrderCode = (String) payload.get("newOrderCode");
+        String reason = (String) payload.get("reason");
+
+        log.info("工单返工, originalId={}, newId={}, reason={}", originalWorkOrderId, newWorkOrderId, reason);
+
+        Map<String, Object> notifyData = new HashMap<>();
+        notifyData.put("originalWorkOrderId", originalWorkOrderId);
+        notifyData.put("newWorkOrderId", newWorkOrderId);
+        notifyData.put("newOrderCode", newOrderCode);
+        notifyData.put("reason", reason);
+        notifyData.put("message", "工单已触发返工, 新工单已创建");
+
+        wsHandler.broadcast("WORK_ORDER_REWORK", notifyData);
+    }
+
+    private void handleDispatchFailed(MaintenanceEvent event) throws Exception {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> payload = objectMapper.readValue(event.getPayload(), Map.class);
+
+        Long workOrderId = getLongValue(payload, "workOrderId");
+        String reason = (String) payload.get("reason");
+
+        log.warn("派工失败, workOrderId={}, reason={}", workOrderId, reason);
+
+        Map<String, Object> notifyData = new HashMap<>();
+        notifyData.put("workOrderId", workOrderId);
+        notifyData.put("reason", reason);
+        notifyData.put("message", "派工失败: " + reason);
+
+        wsHandler.broadcast("DISPATCH_FAILED", notifyData);
     }
 
     private Long getLongValue(Map<String, Object> map, String key) {

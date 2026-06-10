@@ -147,15 +147,25 @@ public class FaultService {
         // 6. Dispatch based on fault level
         DispatchResult dispatchResult;
         if (request.getFaultLevel() >= 3) {
-            // Emergency: fault_level >= 3 (SERIOUS or CRITICAL)
             dispatchResult = autoDispatchService.emergencyDispatch(workOrder, fault);
             log.info("Emergency dispatch attempted for workOrder [{}], result={}",
                     workOrder.getId(), dispatchResult.getMessage());
         } else {
-            // Normal dispatch
             dispatchResult = autoDispatchService.autoDispatch(workOrder, fault);
             log.info("Auto dispatch attempted for workOrder [{}], result={}",
                     workOrder.getId(), dispatchResult.getMessage());
+        }
+
+        // 6b. If dispatch failed, publish DISPATCH_FAILED so the system can alert
+        if (!dispatchResult.isSuccess()) {
+            Map<String, Object> failPayload = new HashMap<>();
+            failPayload.put("workOrderId", workOrder.getId());
+            failPayload.put("orderCode", workOrder.getOrderCode());
+            failPayload.put("faultId", fault.getId());
+            failPayload.put("faultLevel", request.getFaultLevel());
+            failPayload.put("reason", dispatchResult.getMessage());
+            messageQueue.publish(EventType.DISPATCH_FAILED.name(), failPayload);
+            log.warn("Dispatch failed for workOrder [{}], reason={}", workOrder.getId(), dispatchResult.getMessage());
         }
 
         // 7. Publish FAULT_REPORTED event

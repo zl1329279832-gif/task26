@@ -16,7 +16,8 @@ public enum WorkOrderStatus {
     COMPLETED(4, "已完工"),
     SUSPENDED(5, "已暂停"),
     REASSIGNED(6, "已转派"),
-    CLOSED_ABNORMAL(7, "异常关闭");
+    CLOSED_ABNORMAL(7, "异常关闭"),
+    REWORK(8, "返工");
 
     private final int code;
     private final String desc;
@@ -35,6 +36,15 @@ public enum WorkOrderStatus {
         return allowed.contains(target);
     }
 
+    public boolean isTerminal() {
+        return this == COMPLETED || this == CLOSED_ABNORMAL || this == REASSIGNED;
+    }
+
+    public boolean isActive() {
+        return this == CREATED || this == ACCEPTED || this == ARRIVED
+                || this == REPAIRING || this == SUSPENDED || this == REWORK;
+    }
+
     private Set<WorkOrderStatus> getAllowedTransitions() {
         return switch (this) {
             case CREATED -> Set.of(ACCEPTED, REASSIGNED, CLOSED_ABNORMAL);
@@ -42,9 +52,10 @@ public enum WorkOrderStatus {
             case ARRIVED -> Set.of(REPAIRING, SUSPENDED, REASSIGNED, CLOSED_ABNORMAL);
             case REPAIRING -> Set.of(COMPLETED, SUSPENDED, REASSIGNED, CLOSED_ABNORMAL);
             case SUSPENDED -> Set.of(REPAIRING, ARRIVED, REASSIGNED, CLOSED_ABNORMAL);
-            case COMPLETED -> Set.of(CREATED, CLOSED_ABNORMAL);
+            case COMPLETED -> Set.of(REWORK, CLOSED_ABNORMAL);
             case REASSIGNED -> Set.of();
             case CLOSED_ABNORMAL -> Set.of();
+            case REWORK -> Set.of(CREATED, CLOSED_ABNORMAL);
         };
     }
 }

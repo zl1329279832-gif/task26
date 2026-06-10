@@ -2,9 +2,11 @@ package com.maintenance.service;
 
 import com.maintenance.common.BusinessException;
 import com.maintenance.entity.DispatchRecord;
+import com.maintenance.entity.Fault;
 import com.maintenance.entity.SparePart;
 import com.maintenance.entity.SparePartOccupation;
 import com.maintenance.entity.Technician;
+import com.maintenance.entity.TechnicianSkill;
 import com.maintenance.entity.WorkOrder;
 import com.maintenance.enums.DispatchType;
 import com.maintenance.enums.EquipmentStatus;
@@ -17,6 +19,7 @@ import com.maintenance.infrastructure.queue.LocalMessageQueue;
 import com.maintenance.mapper.DispatchRecordMapper;
 import com.maintenance.mapper.EquipmentMapper;
 import com.maintenance.mapper.FaultMapper;
+import com.maintenance.mapper.TechnicianSkillMapper;
 import com.maintenance.mapper.WorkOrderMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -42,8 +45,10 @@ public class WorkOrderService {
     private final FaultMapper faultMapper;
     private final EquipmentMapper equipmentMapper;
     private final TechnicianService technicianService;
+    private final TechnicianSkillMapper technicianSkillMapper;
     private final SparePartService sparePartService;
     private final DowntimeService downtimeService;
+    private final AutoDispatchService autoDispatchService;
     private final LocalMessageQueue messageQueue;
     private final AuditService auditService;
 
@@ -52,8 +57,10 @@ public class WorkOrderService {
                             FaultMapper faultMapper,
                             EquipmentMapper equipmentMapper,
                             TechnicianService technicianService,
+                            TechnicianSkillMapper technicianSkillMapper,
                             SparePartService sparePartService,
                             DowntimeService downtimeService,
+                            AutoDispatchService autoDispatchService,
                             LocalMessageQueue messageQueue,
                             AuditService auditService) {
         this.workOrderMapper = workOrderMapper;
@@ -61,8 +68,10 @@ public class WorkOrderService {
         this.faultMapper = faultMapper;
         this.equipmentMapper = equipmentMapper;
         this.technicianService = technicianService;
+        this.technicianSkillMapper = technicianSkillMapper;
         this.sparePartService = sparePartService;
         this.downtimeService = downtimeService;
+        this.autoDispatchService = autoDispatchService;
         this.messageQueue = messageQueue;
         this.auditService = auditService;
     }
@@ -75,34 +84,22 @@ public class WorkOrderService {
         WorkOrder order = getAndValidate(workOrderId);
         WorkOrderStatus currentStatus = WorkOrderStatus.valueOf(order.getStatus());
         WorkOrderStatus targetStatus = WorkOrderStatus.ACCEPTED;
+        validateTransition(currentStatus, targetStatus);
 
-        if (!currentStatus.canTransitionTo(targetStatus)) {
-            throw new BusinessException("Cannot transition from " + currentStatus.name()
-                    + " to " + targetStatus.name());
-        }
-
-        // 1. Update work order status
         order.setStatus(targetStatus.name());
         order.setAcceptedAt(LocalDateTime.now());
         order.setUpdatedAt(LocalDateTime.now());
         workOrderMapper.updateById(order);
 
-        // 2. Update dispatch record
         DispatchRecord dispatchRecord = dispatchRecordMapper.selectLatestByWorkOrder(workOrderId);
         if (dispatchRecord != null) {
             dispatchRecordMapper.updateAccepted(dispatchRecord.getId(), 1, LocalDateTime.now());
         }
 
-        // 3. Update fault status to PROCESSING
         faultMapper.updateStatus(order.getFaultId(), FaultStatus.PROCESSING.name());
-
-        // 4. Update technician availability to BUSY
         technicianService.updateAvailability(technicianId, TechnicianAvailability.BUSY.name());
 
-        // 5. Publish STATUS_CHANGED event
         publishStatusChange(order, currentStatus.name(), targetStatus.name());
-
-        // 6. Audit log
         auditService.log("WORK_ORDER", "ACCEPT", "WorkOrder", workOrderId,
                 "Technician#" + technicianId,
                 "Work order accepted by technician " + technicianId);
@@ -119,11 +116,7 @@ public class WorkOrderService {
         WorkOrder order = getAndValidate(workOrderId);
         WorkOrderStatus currentStatus = WorkOrderStatus.valueOf(order.getStatus());
         WorkOrderStatus targetStatus = WorkOrderStatus.ARRIVED;
-
-        if (!currentStatus.canTransitionTo(targetStatus)) {
-            throw new BusinessException("Cannot transition from " + currentStatus.name()
-                    + " to " + targetStatus.name());
-        }
+        validateTransition(currentStatus, targetStatus);
 
         order.setStatus(targetStatus.name());
         order.setArrivedAt(LocalDateTime.now());
@@ -131,7 +124,6 @@ public class WorkOrderService {
         workOrderMapper.updateById(order);
 
         publishStatusChange(order, currentStatus.name(), targetStatus.name());
-
         auditService.log("WORK_ORDER", "ARRIVE", "WorkOrder", workOrderId, "SYSTEM",
                 "Technician arrived at site");
 
@@ -147,18 +139,13 @@ public class WorkOrderService {
         WorkOrder order = getAndValidate(workOrderId);
         WorkOrderStatus currentStatus = WorkOrderStatus.valueOf(order.getStatus());
         WorkOrderStatus targetStatus = WorkOrderStatus.REPAIRING;
-
-        if (!currentStatus.canTransitionTo(targetStatus)) {
-            throw new BusinessException("Cannot transition from " + currentStatus.name()
-                    + " to " + targetStatus.name());
-        }
+        validateTransition(currentStatus, targetStatus);
 
         order.setStatus(targetStatus.name());
         order.setUpdatedAt(LocalDateTime.now());
         workOrderMapper.updateById(order);
 
         publishStatusChange(order, currentStatus.name(), targetStatus.name());
-
         auditService.log("WORK_ORDER", "START_REPAIR", "WorkOrder", workOrderId, "SYSTEM",
                 "Repair started");
 
@@ -174,11 +161,7 @@ public class WorkOrderService {
         WorkOrder order = getAndValidate(workOrderId);
         WorkOrderStatus currentStatus = WorkOrderStatus.valueOf(order.getStatus());
         WorkOrderStatus targetStatus = WorkOrderStatus.SUSPENDED;
-
-        if (!currentStatus.canTransitionTo(targetStatus)) {
-            throw new BusinessException("Cannot transition from " + currentStatus.name()
-                    + " to " + targetStatus.name());
-        }
+        validateTransition(currentStatus, targetStatus);
 
         order.setStatus(targetStatus.name());
         order.setSuspendedAt(LocalDateTime.now());
@@ -186,7 +169,6 @@ public class WorkOrderService {
         workOrderMapper.updateById(order);
 
         publishStatusChange(order, currentStatus.name(), targetStatus.name());
-
         auditService.log("WORK_ORDER", "SUSPEND", "WorkOrder", workOrderId, "SYSTEM",
                 "Work order suspended, reason=" + reason);
 
@@ -202,18 +184,13 @@ public class WorkOrderService {
         WorkOrder order = getAndValidate(workOrderId);
         WorkOrderStatus currentStatus = WorkOrderStatus.valueOf(order.getStatus());
         WorkOrderStatus targetStatus = WorkOrderStatus.REPAIRING;
-
-        if (!currentStatus.canTransitionTo(targetStatus)) {
-            throw new BusinessException("Cannot transition from " + currentStatus.name()
-                    + " to " + targetStatus.name());
-        }
+        validateTransition(currentStatus, targetStatus);
 
         order.setStatus(targetStatus.name());
         order.setUpdatedAt(LocalDateTime.now());
         workOrderMapper.updateById(order);
 
         publishStatusChange(order, currentStatus.name(), targetStatus.name());
-
         auditService.log("WORK_ORDER", "RESUME", "WorkOrder", workOrderId, "SYSTEM",
                 "Work order resumed");
 
@@ -230,24 +207,19 @@ public class WorkOrderService {
         WorkOrder order = getAndValidate(workOrderId);
         WorkOrderStatus currentStatus = WorkOrderStatus.valueOf(order.getStatus());
         WorkOrderStatus targetStatus = WorkOrderStatus.COMPLETED;
+        validateTransition(currentStatus, targetStatus);
 
-        // 1. State machine validation
-        if (!currentStatus.canTransitionTo(targetStatus)) {
-            throw new BusinessException("Cannot transition from " + currentStatus.name()
-                    + " to " + targetStatus.name());
-        }
-
-        // 2. Update work order status and completion details
+        // Update work order status and completion details
         order.setStatus(targetStatus.name());
         order.setCompletedAt(LocalDateTime.now());
         order.setRepairNotes(repairNotes);
         order.setLaborCost(laborCost != null ? laborCost : BigDecimal.ZERO);
         order.setUpdatedAt(LocalDateTime.now());
 
-        // 3. Consume all occupied spare parts
+        // Consume all occupied spare parts
         sparePartService.consumeAllByWorkOrder(workOrderId);
 
-        // 4. Calculate total parts cost from occupation records
+        // Calculate total parts cost from occupation records
         List<SparePartOccupation> occupations = sparePartService.getOccupationsByWorkOrder(workOrderId);
         BigDecimal totalPartsCost = BigDecimal.ZERO;
         for (SparePartOccupation occ : occupations) {
@@ -262,11 +234,9 @@ public class WorkOrderService {
         order.setPartsCost(totalPartsCost);
         workOrderMapper.updateById(order);
 
-        // 5. Update technician workload(-1) and availability
+        // Release technician workload
         if (order.getTechnicianId() != null) {
             technicianService.decrementWorkload(order.getTechnicianId());
-
-            // Check if technician has other active orders; if not, set to AVAILABLE
             List<WorkOrder> activeOrders = workOrderMapper.selectActiveByTechnicianId(order.getTechnicianId());
             if (activeOrders == null || activeOrders.isEmpty()) {
                 technicianService.updateAvailability(order.getTechnicianId(),
@@ -274,16 +244,16 @@ public class WorkOrderService {
             }
         }
 
-        // 6. End downtime record
+        // End downtime record
         downtimeService.endDowntime(order.getEquipmentId(), workOrderId);
 
-        // 7. Update fault status to RESOLVED
+        // Update fault status to RESOLVED
         faultMapper.updateStatus(order.getFaultId(), FaultStatus.RESOLVED.name());
 
-        // 8. Update equipment status to RUNNING
+        // Update equipment status to RUNNING
         equipmentMapper.updateStatus(order.getEquipmentId(), EquipmentStatus.RUNNING.name());
 
-        // 9. Publish REPAIR_COMPLETED event
+        // Publish REPAIR_COMPLETED event
         Map<String, Object> eventPayload = new HashMap<>();
         eventPayload.put("workOrderId", workOrderId);
         eventPayload.put("orderCode", order.getOrderCode());
@@ -293,7 +263,7 @@ public class WorkOrderService {
         eventPayload.put("laborCost", laborCost);
         messageQueue.publish(EventType.REPAIR_COMPLETED.name(), eventPayload);
 
-        // 10. Audit log
+        publishStatusChange(order, currentStatus.name(), targetStatus.name());
         auditService.log("WORK_ORDER", "COMPLETE", "WorkOrder", workOrderId, "SYSTEM",
                 "Work order completed: partsCost=" + totalPartsCost
                         + ", laborCost=" + laborCost
@@ -306,28 +276,65 @@ public class WorkOrderService {
 
     /**
      * Reassign work order to a new technician.
-     * Handles state consistency: release old resources, create new assignment, update status.
+     * Validates new technician availability and skill match.
+     * On failure, publishes REASSIGN_FAILED and throws exception (transaction rolls back).
+     * On success, releases spare parts from old assignment and creates new assignment.
      */
     @Transactional
     public WorkOrder reassign(Long workOrderId, Long newTechnicianId, String reason) {
         WorkOrder order = getAndValidate(workOrderId);
+        WorkOrderStatus currentStatus = WorkOrderStatus.valueOf(order.getStatus());
+
+        // 1. Validate state machine allows reassignment
+        if (!currentStatus.canTransitionTo(WorkOrderStatus.REASSIGNED)) {
+            throw new BusinessException("Cannot reassign from status " + currentStatus.name());
+        }
+
+        // 2. Validate new technician exists
         Technician newTech = technicianService.getById(newTechnicianId);
         if (newTech == null) {
+            publishReassignFailed(workOrderId, order.getTechnicianId(), newTechnicianId,
+                    "New technician not found");
             throw new BusinessException("New technician not found, technicianId=" + newTechnicianId);
         }
 
+        // 3. Validate new technician is online
+        String newTechAvailability = newTech.getAvailability();
+        if (TechnicianAvailability.OFFLINE.name().equals(newTechAvailability)
+                || TechnicianAvailability.ON_LEAVE.name().equals(newTechAvailability)) {
+            publishReassignFailed(workOrderId, order.getTechnicianId(), newTechnicianId,
+                    "New technician is " + newTechAvailability);
+            throw new BusinessException("Cannot reassign to technician " + newTechnicianId
+                    + ": status is " + newTechAvailability);
+        }
+
+        // 4. Validate new technician has matching skill
+        Fault fault = faultMapper.selectById(order.getFaultId());
+        if (fault != null) {
+            TechnicianSkill skill = technicianSkillMapper.selectByTechnicianAndType(
+                    newTechnicianId, fault.getEquipmentType());
+            if (skill == null) {
+                publishReassignFailed(workOrderId, order.getTechnicianId(), newTechnicianId,
+                        "No matching skill for equipmentType=" + fault.getEquipmentType());
+                throw new BusinessException("Technician " + newTechnicianId
+                        + " lacks skill for equipmentType=" + fault.getEquipmentType());
+            }
+            if (skill.getCertifiedFaultLevel() == null
+                    || skill.getCertifiedFaultLevel() < fault.getFaultLevel()) {
+                publishReassignFailed(workOrderId, order.getTechnicianId(), newTechnicianId,
+                        "Certified level " + skill.getCertifiedFaultLevel()
+                                + " < required " + fault.getFaultLevel());
+                throw new BusinessException("Technician " + newTechnicianId
+                        + " certification level insufficient for fault level " + fault.getFaultLevel());
+            }
+        }
+
         Long oldTechnicianId = order.getTechnicianId();
-        String oldStatus = order.getStatus();
 
-        // 1. Set work order status to REASSIGNED
-        order.setStatus(WorkOrderStatus.REASSIGNED.name());
-        order.setUpdatedAt(LocalDateTime.now());
-        workOrderMapper.updateById(order);
-
-        // 2. Release spare parts occupied by the old work order
+        // 5. Release spare parts occupied by the old assignment
         sparePartService.releaseOccupationsByWorkOrder(workOrderId);
 
-        // 3. Old technician: workload-1, check availability
+        // 6. Release old technician workload
         if (oldTechnicianId != null) {
             technicianService.decrementWorkload(oldTechnicianId);
             List<WorkOrder> oldActiveOrders = workOrderMapper.selectActiveByTechnicianId(oldTechnicianId);
@@ -337,7 +344,14 @@ public class WorkOrderService {
             }
         }
 
-        // 4. Create new dispatch record (type=REASSIGN)
+        // 7. Set work order to REASSIGNED transitionally
+        order.setStatus(WorkOrderStatus.REASSIGNED.name());
+        order.setUpdatedAt(LocalDateTime.now());
+        workOrderMapper.updateById(order);
+
+        publishStatusChange(order, currentStatus.name(), WorkOrderStatus.REASSIGNED.name());
+
+        // 8. Create new dispatch record (type=REASSIGN)
         DispatchRecord newDispatch = new DispatchRecord();
         newDispatch.setWorkOrderId(workOrderId);
         newDispatch.setTechnicianId(newTechnicianId);
@@ -347,17 +361,17 @@ public class WorkOrderService {
         newDispatch.setCreatedAt(LocalDateTime.now());
         dispatchRecordMapper.insert(newDispatch);
 
-        // 5. Update work order: new technician, status=CREATED, reassign_count+1
+        // 9. Update work order: new technician, status=CREATED, reassign_count+1
         order.setTechnicianId(newTechnicianId);
         order.setStatus(WorkOrderStatus.CREATED.name());
         order.setReassignCount((order.getReassignCount() != null ? order.getReassignCount() : 0) + 1);
         order.setUpdatedAt(LocalDateTime.now());
         workOrderMapper.updateById(order);
 
-        // 6. New technician: workload+1
+        // 10. New technician: workload+1
         technicianService.incrementWorkload(newTechnicianId);
 
-        // 7. Publish WORK_ORDER_REASSIGNED event
+        // 11. Publish WORK_ORDER_REASSIGNED event
         Map<String, Object> eventPayload = new HashMap<>();
         eventPayload.put("workOrderId", workOrderId);
         eventPayload.put("orderCode", order.getOrderCode());
@@ -366,20 +380,95 @@ public class WorkOrderService {
         eventPayload.put("reason", reason);
         messageQueue.publish(EventType.WORK_ORDER_REASSIGNED.name(), eventPayload);
 
-        // 8. Audit log with reason
+        publishStatusChange(order, WorkOrderStatus.REASSIGNED.name(), WorkOrderStatus.CREATED.name());
+
         auditService.log("WORK_ORDER", "REASSIGN", "WorkOrder", workOrderId, "SYSTEM",
                 "Work order reassigned from technician#" + oldTechnicianId
                         + " to technician#" + newTechnicianId
-                        + ", reason=" + reason);
+                        + ", reason=" + reason
+                        + ", spare parts released");
 
-        log.info("WorkOrder [{}] reassigned from [{}] to [{}], reason={}",
+        log.info("WorkOrder [{}] reassigned from [{}] to [{}], reason={}, parts released",
                 workOrderId, oldTechnicianId, newTechnicianId, reason);
         return order;
     }
 
     /**
+     * Rework a completed order: COMPLETED -> REWORK.
+     * Creates a new linked work order and triggers dispatch.
+     */
+    @Transactional
+    public WorkOrder rework(Long workOrderId, String reason) {
+        WorkOrder originalOrder = getAndValidate(workOrderId);
+        WorkOrderStatus currentStatus = WorkOrderStatus.valueOf(originalOrder.getStatus());
+        WorkOrderStatus targetStatus = WorkOrderStatus.REWORK;
+        validateTransition(currentStatus, targetStatus);
+
+        // 1. Mark original order as REWORK
+        originalOrder.setStatus(targetStatus.name());
+        originalOrder.setUpdatedAt(LocalDateTime.now());
+        workOrderMapper.updateById(originalOrder);
+
+        publishStatusChange(originalOrder, currentStatus.name(), targetStatus.name());
+
+        // 2. Re-open the fault
+        faultMapper.updateStatus(originalOrder.getFaultId(), FaultStatus.PROCESSING.name());
+
+        // 3. Update equipment status back to FAULT
+        equipmentMapper.updateStatus(originalOrder.getEquipmentId(), EquipmentStatus.FAULT.name());
+
+        // 4. Create new work order linked to original
+        WorkOrder newOrder = new WorkOrder();
+        newOrder.setOrderCode(generateOrderCode());
+        newOrder.setFaultId(originalOrder.getFaultId());
+        newOrder.setEquipmentId(originalOrder.getEquipmentId());
+        newOrder.setStatus(WorkOrderStatus.CREATED.name());
+        newOrder.setPriority(originalOrder.getPriority());
+        newOrder.setFaultDescription(originalOrder.getFaultDescription());
+        newOrder.setReassignCount(0);
+        newOrder.setEscalateCount(0);
+        newOrder.setIsRerepair(1);
+        newOrder.setOriginalOrderId(workOrderId);
+        newOrder.setCreatedAt(LocalDateTime.now());
+        newOrder.setUpdatedAt(LocalDateTime.now());
+        workOrderMapper.insert(newOrder);
+
+        // 5. Start new downtime record
+        Fault fault = faultMapper.selectById(originalOrder.getFaultId());
+        downtimeService.startDowntime(originalOrder.getEquipmentId(), newOrder.getId(),
+                originalOrder.getFaultId());
+
+        // 6. Auto dispatch the new order
+        if (fault != null) {
+            com.maintenance.dto.DispatchResult dispatchResult;
+            if (fault.getFaultLevel() >= 3) {
+                dispatchResult = autoDispatchService.emergencyDispatch(newOrder, fault);
+            } else {
+                dispatchResult = autoDispatchService.autoDispatch(newOrder, fault);
+            }
+            log.info("Rework dispatch for new workOrder [{}], result={}",
+                    newOrder.getId(), dispatchResult.getMessage());
+        }
+
+        // 7. Publish WORK_ORDER_REWORK event
+        Map<String, Object> eventPayload = new HashMap<>();
+        eventPayload.put("originalWorkOrderId", workOrderId);
+        eventPayload.put("newWorkOrderId", newOrder.getId());
+        eventPayload.put("newOrderCode", newOrder.getOrderCode());
+        eventPayload.put("equipmentId", originalOrder.getEquipmentId());
+        eventPayload.put("reason", reason);
+        messageQueue.publish(EventType.WORK_ORDER_REWORK.name(), eventPayload);
+
+        auditService.log("WORK_ORDER", "REWORK", "WorkOrder", workOrderId, "SYSTEM",
+                "Work order rework initiated: newOrderId=" + newOrder.getId()
+                        + ", reason=" + reason);
+
+        log.info("WorkOrder [{}] marked as REWORK, new order [{}] created", workOrderId, newOrder.getId());
+        return newOrder;
+    }
+
+    /**
      * Escalate work order: increase priority (max 4), increment escalate_count.
-     * If already at max priority, attempt re-dispatch to a higher-level technician.
      */
     @Transactional
     public WorkOrder escalate(Long workOrderId) {
@@ -389,23 +478,15 @@ public class WorkOrderService {
         int escalateCount = order.getEscalateCount() != null ? order.getEscalateCount() : 0;
 
         if (currentPriority < 4) {
-            // Increase priority
             order.setPriority(currentPriority + 1);
-            order.setEscalateCount(escalateCount + 1);
-            order.setUpdatedAt(LocalDateTime.now());
-            workOrderMapper.updateById(order);
-            log.info("WorkOrder [{}] escalated from priority {} to {}",
-                    workOrderId, currentPriority, currentPriority + 1);
-        } else {
-            // Already at max priority - increment count and log
-            order.setEscalateCount(escalateCount + 1);
-            order.setUpdatedAt(LocalDateTime.now());
-            workOrderMapper.updateById(order);
-            log.info("WorkOrder [{}] already at max priority, escalate_count incremented to {}",
-                    workOrderId, escalateCount + 1);
         }
+        order.setEscalateCount(escalateCount + 1);
+        order.setUpdatedAt(LocalDateTime.now());
+        workOrderMapper.updateById(order);
 
-        // Publish WORK_ORDER_ESCALATED event
+        log.info("WorkOrder [{}] escalated: priority {} -> {}, escalateCount={}",
+                workOrderId, currentPriority, order.getPriority(), order.getEscalateCount());
+
         Map<String, Object> eventPayload = new HashMap<>();
         eventPayload.put("workOrderId", workOrderId);
         eventPayload.put("orderCode", order.getOrderCode());
@@ -414,7 +495,6 @@ public class WorkOrderService {
         eventPayload.put("escalateCount", order.getEscalateCount());
         messageQueue.publish(EventType.WORK_ORDER_ESCALATED.name(), eventPayload);
 
-        // Audit log
         auditService.log("WORK_ORDER", "ESCALATE", "WorkOrder", workOrderId, "SYSTEM",
                 "Work order escalated: priority " + currentPriority + " -> " + order.getPriority()
                         + ", escalateCount=" + order.getEscalateCount());
@@ -423,18 +503,23 @@ public class WorkOrderService {
     }
 
     /**
-     * Abnormal close: any status -> CLOSED_ABNORMAL.
+     * Abnormal close: active status -> CLOSED_ABNORMAL.
      * Releases all resources (parts, technician) and ends downtime.
      */
     @Transactional
     public WorkOrder closeAbnormal(Long workOrderId, String reason) {
         WorkOrder order = getAndValidate(workOrderId);
-        String oldStatus = order.getStatus();
+        WorkOrderStatus currentStatus = WorkOrderStatus.valueOf(order.getStatus());
 
-        // 1. Release spare parts occupation
+        // Validate: only active or completed orders can be abnormally closed
+        if (!currentStatus.canTransitionTo(WorkOrderStatus.CLOSED_ABNORMAL)) {
+            throw new BusinessException("Cannot close order from status " + currentStatus.name());
+        }
+
+        // Release spare parts occupation
         sparePartService.releaseOccupationsByWorkOrder(workOrderId);
 
-        // 2. Release technician (workload-1)
+        // Release technician
         if (order.getTechnicianId() != null) {
             technicianService.decrementWorkload(order.getTechnicianId());
             List<WorkOrder> activeOrders = workOrderMapper.selectActiveByTechnicianId(order.getTechnicianId());
@@ -444,76 +529,61 @@ public class WorkOrderService {
             }
         }
 
-        // 3. Update fault status to CLOSED
+        // Update fault status to CLOSED
         if (order.getFaultId() != null) {
             faultMapper.updateStatus(order.getFaultId(), FaultStatus.CLOSED.name());
         }
 
-        // 4. End downtime record
+        // End downtime record
         downtimeService.endDowntime(order.getEquipmentId(), workOrderId);
 
-        // 5. Update work order status
+        // Update work order status
         order.setStatus(WorkOrderStatus.CLOSED_ABNORMAL.name());
         order.setUpdatedAt(LocalDateTime.now());
         workOrderMapper.updateById(order);
 
-        // 6. Publish WORK_ORDER_CLOSED event
+        // Publish WORK_ORDER_CLOSED event
         Map<String, Object> eventPayload = new HashMap<>();
         eventPayload.put("workOrderId", workOrderId);
         eventPayload.put("orderCode", order.getOrderCode());
-        eventPayload.put("previousStatus", oldStatus);
+        eventPayload.put("previousStatus", currentStatus.name());
+        eventPayload.put("technicianId", order.getTechnicianId());
         eventPayload.put("reason", reason);
         messageQueue.publish(EventType.WORK_ORDER_CLOSED.name(), eventPayload);
 
-        // 7. Audit log
-        auditService.log("WORK_ORDER", "CLOSE_ABNORMAL", "WorkOrder", workOrderId, "SYSTEM",
-                "Work order abnormally closed from status=" + oldStatus + ", reason=" + reason);
+        publishStatusChange(order, currentStatus.name(), WorkOrderStatus.CLOSED_ABNORMAL.name());
 
-        log.info("WorkOrder [{}] abnormally closed from [{}], reason={}",
-                workOrderId, oldStatus, reason);
+        auditService.log("WORK_ORDER", "CLOSE_ABNORMAL", "WorkOrder", workOrderId, "SYSTEM",
+                "Work order abnormally closed from status=" + currentStatus.name()
+                        + ", reason=" + reason
+                        + ", spare parts released");
+
+        log.info("WorkOrder [{}] abnormally closed from [{}], reason={}", workOrderId, currentStatus.name(), reason);
         return order;
     }
 
-    /**
-     * Get a work order by ID.
-     */
     public WorkOrder getById(Long id) {
         return workOrderMapper.selectById(id);
     }
 
-    /**
-     * Get all work orders for a technician.
-     */
     public List<WorkOrder> getByTechnician(Long technicianId) {
         return workOrderMapper.selectByTechnicianId(technicianId);
     }
 
-    /**
-     * Get work orders by status.
-     */
     public List<WorkOrder> getByStatus(String status) {
         return workOrderMapper.selectByStatus(status);
     }
 
-    /**
-     * Get active work orders for a technician (not COMPLETED/REASSIGNED/CLOSED_ABNORMAL).
-     */
     public List<WorkOrder> getActiveByTechnician(Long technicianId) {
         return workOrderMapper.selectActiveByTechnicianId(technicianId);
     }
 
-    /**
-     * Generate work order code: "WO" + yyyyMMddHHmmss + 4-digit random number.
-     */
     private String generateOrderCode() {
         String timestamp = LocalDateTime.now().format(CODE_FORMATTER);
         int randomNum = RANDOM.nextInt(10000);
         return "WO" + timestamp + String.format("%04d", randomNum);
     }
 
-    /**
-     * Publish a STATUS_CHANGED event.
-     */
     private void publishStatusChange(WorkOrder order, String oldStatus, String newStatus) {
         Map<String, Object> eventPayload = new HashMap<>();
         eventPayload.put("workOrderId", order.getId());
@@ -525,9 +595,28 @@ public class WorkOrderService {
         messageQueue.publish(EventType.STATUS_CHANGED.name(), eventPayload);
     }
 
-    /**
-     * Get and validate that a work order exists.
-     */
+    private void publishReassignFailed(Long workOrderId, Long oldTechnicianId,
+                                        Long newTechnicianId, String reason) {
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("workOrderId", workOrderId);
+        payload.put("oldTechnicianId", oldTechnicianId);
+        payload.put("newTechnicianId", newTechnicianId);
+        payload.put("reason", reason);
+        messageQueue.publish(EventType.REASSIGN_FAILED.name(), payload);
+
+        auditService.log("WORK_ORDER", "REASSIGN_FAILED", "WorkOrder", workOrderId, "SYSTEM",
+                "Reassign failed: from technician#" + oldTechnicianId
+                        + " to technician#" + newTechnicianId
+                        + ", reason=" + reason);
+    }
+
+    private void validateTransition(WorkOrderStatus current, WorkOrderStatus target) {
+        if (!current.canTransitionTo(target)) {
+            throw new BusinessException("Cannot transition from " + current.name()
+                    + " to " + target.name());
+        }
+    }
+
     private WorkOrder getAndValidate(Long workOrderId) {
         WorkOrder order = workOrderMapper.selectById(workOrderId);
         if (order == null) {

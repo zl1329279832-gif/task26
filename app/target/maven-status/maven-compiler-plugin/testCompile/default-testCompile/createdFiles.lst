@@ -1,0 +1,4 @@
+com\maintenance\service\SparePartServiceTest.class
+com\maintenance\service\WorkOrderServiceTest.class
+com\maintenance\infrastructure\queue\EventDispatcherTest.class
+com\maintenance\service\AutoDispatchServiceTest.class
