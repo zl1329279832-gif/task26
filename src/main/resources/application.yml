@@ -1,0 +1,33 @@
+server:
+  port: 8080
+
+spring:
+  profiles:
+    active: dev
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: Asia/Shanghai
+    serialization:
+      write-dates-as-timestamps: false
+
+mybatis:
+  mapper-locations: classpath:mapper/*.xml
+  type-aliases-package: com.factory.repair.model.entity
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+
+factory:
+  dispatch:
+    timeout-minutes: 30
+    max-retry: 3
+    weights:
+      skill: 35
+      workload: 25
+      spare-part: 20
+      response: 10
+      priority: 10
+  spare-part:
+    reservation-expire-hours: 24
+  duplicate-report:
+    window-minutes: 10

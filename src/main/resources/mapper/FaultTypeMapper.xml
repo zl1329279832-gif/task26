@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.factory.repair.mapper.FaultTypeMapper">
+    <select id="selectById" resultType="FaultType">
+        SELECT * FROM fault_type WHERE id = #{id}
+    </select>
+    <select id="selectByCode" resultType="FaultType">
+        SELECT * FROM fault_type WHERE fault_code = #{faultCode}
+    </select>
+    <select id="selectByEquipmentType" resultType="FaultType">
+        SELECT * FROM fault_type WHERE equipment_type = #{equipmentType}
+    </select>
+    <select id="selectAll" resultType="FaultType">
+        SELECT * FROM fault_type ORDER BY id
+    </select>
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO fault_type (fault_code, fault_name, equipment_type, fault_level, required_skills, estimated_hours)
+        VALUES (#{faultCode}, #{faultName}, #{equipmentType}, #{faultLevel}, #{requiredSkills}, #{estimatedHours})
+    </insert>
+</mapper>

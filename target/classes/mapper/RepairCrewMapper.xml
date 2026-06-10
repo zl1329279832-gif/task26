@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.factory.repair.mapper.RepairCrewMapper">
+    <select id="selectById" resultType="RepairCrew">
+        SELECT * FROM repair_crew WHERE id = #{id}
+    </select>
+    <select id="selectByCode" resultType="RepairCrew">
+        SELECT * FROM repair_crew WHERE crew_code = #{crewCode}
+    </select>
+    <select id="selectActive" resultType="RepairCrew">
+        SELECT * FROM repair_crew WHERE is_active = 1
+    </select>
+    <select id="selectAll" resultType="RepairCrew">
+        SELECT * FROM repair_crew ORDER BY id
+    </select>
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO repair_crew (crew_code, crew_name, skills, shift_type, is_active)
+        VALUES (#{crewCode}, #{crewName}, #{skills}, #{shiftType}, #{isActive})
+    </insert>
+    <update id="update">
+        UPDATE repair_crew SET crew_name = #{crewName}, skills = #{skills},
+        shift_type = #{shiftType}, is_active = #{isActive} WHERE id = #{id}
+    </update>
+</mapper>

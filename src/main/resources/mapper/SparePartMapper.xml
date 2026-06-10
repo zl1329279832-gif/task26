@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.factory.repair.mapper.SparePartMapper">
+    <select id="selectById" resultType="SparePart">
+        SELECT * FROM spare_part WHERE id = #{id}
+    </select>
+    <select id="selectByCode" resultType="SparePart">
+        SELECT * FROM spare_part WHERE part_code = #{partCode}
+    </select>
+    <select id="selectByEquipmentType" resultType="SparePart">
+        SELECT * FROM spare_part WHERE equipment_type = #{equipmentType}
+    </select>
+    <select id="selectLowStock" resultType="SparePart">
+        SELECT * FROM spare_part WHERE available_qty &lt;= min_stock AND min_stock > 0
+    </select>
+    <select id="selectAll" resultType="SparePart">
+        SELECT * FROM spare_part ORDER BY id
+    </select>
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO spare_part (part_code, part_name, equipment_type, total_qty, available_qty, reserved_qty, min_stock, unit_price, version)
+        VALUES (#{partCode}, #{partName}, #{equipmentType}, #{totalQty}, #{availableQty}, #{reservedQty}, #{minStock}, #{unitPrice}, 0)
+    </insert>
+    <update id="reserveWithVersion">
+        UPDATE spare_part SET available_qty = available_qty - #{qty}, reserved_qty = reserved_qty + #{qty},
+        version = version + 1 WHERE id = #{id} AND version = #{version} AND available_qty >= #{qty}
+    </update>
+    <update id="releaseWithVersion">
+        UPDATE spare_part SET available_qty = available_qty + #{qty}, reserved_qty = reserved_qty - #{qty},
+        version = version + 1 WHERE id = #{id} AND version = #{version}
+    </update>
+    <update id="consumeWithVersion">
+        UPDATE spare_part SET total_qty = total_qty - #{qty}, reserved_qty = reserved_qty - #{qty},
+        version = version + 1 WHERE id = #{id} AND version = #{version}
+    </update>
+    <update id="update">
+        UPDATE spare_part SET part_name = #{partName}, equipment_type = #{equipmentType},
+        total_qty = #{totalQty}, available_qty = #{availableQty}, reserved_qty = #{reservedQty},
+        min_stock = #{minStock}, unit_price = #{unitPrice} WHERE id = #{id}
+    </update>
+</mapper>

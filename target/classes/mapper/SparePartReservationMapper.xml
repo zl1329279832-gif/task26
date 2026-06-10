@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.factory.repair.mapper.SparePartReservationMapper">
+    <select id="selectById" resultType="SparePartReservation">
+        SELECT * FROM spare_part_reservation WHERE id = #{id}
+    </select>
+    <select id="selectByWorkOrderId" resultType="SparePartReservation">
+        SELECT * FROM spare_part_reservation WHERE work_order_id = #{workOrderId} ORDER BY created_at DESC
+    </select>
+    <select id="selectReservedByWorkOrderId" resultType="SparePartReservation">
+        SELECT * FROM spare_part_reservation WHERE work_order_id = #{workOrderId} AND status = 'RESERVED'
+    </select>
+    <select id="selectExpired" resultType="SparePartReservation">
+        SELECT * FROM spare_part_reservation WHERE status = 'RESERVED' AND expire_at &lt; NOW()
+    </select>
+    <select id="selectOrphanedReservations" resultType="SparePartReservation">
+        SELECT r.* FROM spare_part_reservation r JOIN work_order w ON r.work_order_id = w.id
+        WHERE r.status = 'RESERVED' AND w.status IN ('CLOSED','CANCELLED')
+    </select>
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO spare_part_reservation (work_order_id, spare_part_id, quantity, status, reserved_at, consumed_at, released_at, expire_at, release_reason, version)
+        VALUES (#{workOrderId}, #{sparePartId}, #{quantity}, #{status}, #{reservedAt}, #{consumedAt}, #{releasedAt}, #{expireAt}, #{releaseReason}, 0)
+    </insert>
+    <update id="updateStatusWithVersion">
+        UPDATE spare_part_reservation SET status = #{status}, version = version + 1
+        WHERE id = #{id} AND version = #{version}
+    </update>
+    <update id="update">
+        UPDATE spare_part_reservation SET status = #{status}, consumed_at = #{consumedAt},
+        released_at = #{releasedAt}, release_reason = #{releaseReason}, version = version + 1
+        WHERE id = #{id}
+    </update>
+</mapper>

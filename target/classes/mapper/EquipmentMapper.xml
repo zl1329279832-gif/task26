@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.factory.repair.mapper.EquipmentMapper">
+    <resultMap id="BaseResultMap" type="Equipment">
+        <id column="id" property="id"/>
+        <result column="equipment_code" property="equipmentCode"/>
+        <result column="equipment_name" property="equipmentName"/>
+        <result column="equipment_type" property="equipmentType"/>
+        <result column="location" property="location"/>
+        <result column="status" property="status"/>
+        <result column="hourly_loss" property="hourlyLoss"/>
+        <result column="created_at" property="createdAt"/>
+        <result column="updated_at" property="updatedAt"/>
+    </resultMap>
+
+    <select id="selectById" resultMap="BaseResultMap">
+        SELECT * FROM equipment WHERE id = #{id}
+    </select>
+    <select id="selectByCode" resultMap="BaseResultMap">
+        SELECT * FROM equipment WHERE equipment_code = #{equipmentCode}
+    </select>
+    <select id="selectByType" resultMap="BaseResultMap">
+        SELECT * FROM equipment WHERE equipment_type = #{equipmentType}
+    </select>
+    <select id="selectAll" resultMap="BaseResultMap">
+        SELECT * FROM equipment ORDER BY id
+    </select>
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO equipment (equipment_code, equipment_name, equipment_type, location, status, hourly_loss)
+        VALUES (#{equipmentCode}, #{equipmentName}, #{equipmentType}, #{location}, #{status}, #{hourlyLoss})
+    </insert>
+    <update id="updateStatus">
+        UPDATE equipment SET status = #{status} WHERE id = #{id}
+    </update>
+    <update id="update">
+        UPDATE equipment SET equipment_name = #{equipmentName}, equipment_type = #{equipmentType},
+        location = #{location}, status = #{status}, hourly_loss = #{hourlyLoss} WHERE id = #{id}
+    </update>
+</mapper>

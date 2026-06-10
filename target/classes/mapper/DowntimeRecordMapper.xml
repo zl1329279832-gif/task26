@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.factory.repair.mapper.DowntimeRecordMapper">
+    <select id="selectById" resultType="DowntimeRecord">
+        SELECT * FROM downtime_record WHERE id = #{id}
+    </select>
+    <select id="selectByEquipmentId" resultType="DowntimeRecord">
+        SELECT * FROM downtime_record WHERE equipment_id = #{equipmentId} ORDER BY start_time DESC
+    </select>
+    <select id="selectByWorkOrderId" resultType="DowntimeRecord">
+        SELECT * FROM downtime_record WHERE work_order_id = #{workOrderId}
+    </select>
+    <select id="selectOngoing" resultType="DowntimeRecord">
+        SELECT * FROM downtime_record WHERE end_time IS NULL
+    </select>
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO downtime_record (equipment_id, work_order_id, start_time, end_time, duration_minutes, hourly_loss, total_loss)
+        VALUES (#{equipmentId}, #{workOrderId}, #{startTime}, #{endTime}, #{durationMinutes}, #{hourlyLoss}, #{totalLoss})
+    </insert>
+    <update id="update">
+        UPDATE downtime_record SET end_time = #{endTime}, duration_minutes = #{durationMinutes},
+        total_loss = #{totalLoss} WHERE id = #{id}
+    </update>
+</mapper>

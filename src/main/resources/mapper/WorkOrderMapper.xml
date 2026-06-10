@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.factory.repair.mapper.WorkOrderMapper">
+    <select id="selectById" resultType="WorkOrder">
+        SELECT * FROM work_order WHERE id = #{id}
+    </select>
+    <select id="selectByOrderNo" resultType="WorkOrder">
+        SELECT * FROM work_order WHERE order_no = #{orderNo}
+    </select>
+    <select id="selectByEquipmentId" resultType="WorkOrder">
+        SELECT * FROM work_order WHERE equipment_id = #{equipmentId} ORDER BY created_at DESC
+    </select>
+    <select id="selectByStatus" resultType="WorkOrder">
+        SELECT * FROM work_order WHERE status = #{status} ORDER BY priority ASC, reported_at ASC
+    </select>
+    <select id="selectByAssignedWorkerId" resultType="WorkOrder">
+        SELECT * FROM work_order WHERE assigned_worker_id = #{assignedWorkerId} AND status NOT IN ('CLOSED','CANCELLED')
+    </select>
+    <select id="selectActiveByEquipmentAndFaultType" resultType="WorkOrder">
+        SELECT * FROM work_order WHERE equipment_id = #{equipmentId} AND fault_type_id = #{faultTypeId}
+        AND status NOT IN ('CLOSED','CANCELLED') ORDER BY created_at DESC
+    </select>
+    <select id="selectByParentOrderId" resultType="WorkOrder">
+        SELECT * FROM work_order WHERE parent_order_id = #{parentOrderId}
+    </select>
+    <select id="selectAll" resultType="WorkOrder">
+        SELECT * FROM work_order
+        <where>
+            <if test="status != null">AND status = #{status}</if>
+            <if test="faultLevel != null">AND fault_level = #{faultLevel}</if>
+            <if test="equipmentId != null">AND equipment_id = #{equipmentId}</if>
+        </where>
+        ORDER BY priority ASC, reported_at DESC
+    </select>
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO work_order (order_no, equipment_id, fault_type_id, fault_description, fault_level, status,
+        reporter_id, assigned_worker_id, assigned_crew_id, priority, reported_at, dispatched_at, accepted_at,
+        arrived_at, completed_at, closed_at, parent_order_id, remark, version)
+        VALUES (#{orderNo}, #{equipmentId}, #{faultTypeId}, #{faultDescription}, #{faultLevel}, #{status},
+        #{reporterId}, #{assignedWorkerId}, #{assignedCrewId}, #{priority}, #{reportedAt}, #{dispatchedAt},
+        #{acceptedAt}, #{arrivedAt}, #{completedAt}, #{closedAt}, #{parentOrderId}, #{remark}, 0)
+    </insert>
+    <update id="updateStatusWithVersion">
+        UPDATE work_order SET status = #{newStatus}, version = version + 1, updated_at = NOW()
+        WHERE id = #{id} AND version = #{version}
+    </update>
+    <update id="update">
+        UPDATE work_order SET
+        status = #{status}, assigned_worker_id = #{assignedWorkerId}, assigned_crew_id = #{assignedCrewId},
+        priority = #{priority}, dispatched_at = #{dispatchedAt}, accepted_at = #{acceptedAt},
+        arrived_at = #{arrivedAt}, completed_at = #{completedAt}, closed_at = #{closedAt},
+        remark = #{remark}, fault_level = #{faultLevel}, version = version + 1
+        WHERE id = #{id}
+    </update>
+</mapper>

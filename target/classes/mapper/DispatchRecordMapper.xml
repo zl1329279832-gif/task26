@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.factory.repair.mapper.DispatchRecordMapper">
+    <select id="selectById" resultType="DispatchRecord">
+        SELECT * FROM dispatch_record WHERE id = #{id}
+    </select>
+    <select id="selectByWorkOrderId" resultType="DispatchRecord">
+        SELECT * FROM dispatch_record WHERE work_order_id = #{workOrderId} ORDER BY created_at DESC
+    </select>
+    <select id="selectByWorkerId" resultType="DispatchRecord">
+        SELECT * FROM dispatch_record WHERE worker_id = #{workerId} ORDER BY created_at DESC
+    </select>
+    <select id="selectPendingTimeout" resultType="DispatchRecord">
+        SELECT * FROM dispatch_record WHERE dispatch_status = 'PENDING'
+        AND DATE_ADD(dispatched_at, INTERVAL timeout_minutes MINUTE) &lt; NOW()
+    </select>
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO dispatch_record (work_order_id, worker_id, crew_id, dispatch_type, dispatch_status,
+        score, score_detail, dispatched_at, responded_at, timeout_minutes, remark)
+        VALUES (#{workOrderId}, #{workerId}, #{crewId}, #{dispatchType}, #{dispatchStatus},
+        #{score}, #{scoreDetail}, #{dispatchedAt}, #{respondedAt}, #{timeoutMinutes}, #{remark})
+    </insert>
+    <update id="updateStatus">
+        UPDATE dispatch_record SET dispatch_status = #{dispatchStatus}, responded_at = NOW(),
+        remark = #{remark} WHERE id = #{id}
+    </update>
+    <update id="cancelByWorkOrderId">
+        UPDATE dispatch_record SET dispatch_status = 'CANCELLED'
+        WHERE work_order_id = #{workOrderId} AND dispatch_status = 'PENDING'
+    </update>
+</mapper>
