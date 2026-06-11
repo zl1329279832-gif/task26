@@ -1,9 +1,15 @@
+com\maintenance\service\ConcurrencySafetyTest$FaultServiceConcurrencyTest.class
+com\maintenance\service\ConcurrencySafetyTest.class
+com\maintenance\service\ConcurrencySafetyTest$ConsumerEvictionTest.class
+com\maintenance\service\ConcurrencySafetyTest$SlaIdempotencyTest.class
+com\maintenance\infrastructure\LocalMessageQueueTest.class
+com\maintenance\service\SlaServiceTest.class
+com\maintenance\service\ConcurrencySafetyTest$WorkOrderCasTest.class
 com\maintenance\service\PredictiveDispatchServiceTest.class
+com\maintenance\service\ConcurrencySafetyTest$SparePartIdempotencyTest.class
 com\maintenance\service\WorkOrderServiceTest.class
 com\maintenance\service\DowntimeServiceTest.class
 com\maintenance\service\AutoDispatchServiceTest.class
-com\maintenance\infrastructure\LocalMessageQueueTest.class
 com\maintenance\service\SparePartServiceTest.class
 com\maintenance\service\FaultServiceTest.class
-com\maintenance\service\SlaServiceTest.class
 com\maintenance\consumer\ConsumerIdempotencyTest.class

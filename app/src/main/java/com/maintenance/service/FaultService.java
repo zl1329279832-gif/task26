@@ -22,6 +22,7 @@ import com.maintenance.mapper.SparePartMapper;
 import com.maintenance.mapper.WorkOrderMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Lazy;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -31,6 +32,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.concurrent.TimeUnit;
 
 @Slf4j
 @Service
@@ -38,6 +40,7 @@ public class FaultService {
 
     private static final DateTimeFormatter CODE_FORMATTER = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
     private static final Random RANDOM = new Random();
+    private static final String FAULT_REPORT_LOCK_PREFIX = "fault:report:lock:";
 
     private final FaultMapper faultMapper;
     private final EquipmentMapper equipmentMapper;
@@ -49,6 +52,7 @@ public class FaultService {
     private final DowntimeService downtimeService;
     private final PredictiveDispatchService predictiveDispatchService;
     private final SlaService slaService;
+    private final RedisTemplate<String, Object> redisTemplate;
 
     public FaultService(FaultMapper faultMapper,
                         EquipmentMapper equipmentMapper,
@@ -59,7 +63,8 @@ public class FaultService {
                         AuditService auditService,
                         DowntimeService downtimeService,
                         @Lazy PredictiveDispatchService predictiveDispatchService,
-                        SlaService slaService) {
+                        SlaService slaService,
+                        RedisTemplate<String, Object> redisTemplate) {
         this.faultMapper = faultMapper;
         this.equipmentMapper = equipmentMapper;
         this.workOrderMapper = workOrderMapper;
@@ -70,6 +75,7 @@ public class FaultService {
         this.downtimeService = downtimeService;
         this.predictiveDispatchService = predictiveDispatchService;
         this.slaService = slaService;
+        this.redisTemplate = redisTemplate;
     }
 
     /**
@@ -85,6 +91,34 @@ public class FaultService {
             throw new BusinessException("Equipment not found, equipmentId=" + request.getEquipmentId());
         }
 
+        // FIX: Use Redis lock to make duplicate fault detection atomic.
+        // Without this lock, two concurrent reports for the same equipment+level
+        // could both pass the duplicate check and create two faults/work orders.
+        String lockKey = FAULT_REPORT_LOCK_PREFIX + request.getEquipmentId() + ":" + request.getFaultLevel();
+        boolean locked = false;
+        try {
+            locked = Boolean.TRUE.equals(
+                    redisTemplate.opsForValue().setIfAbsent(lockKey, "1", 30, TimeUnit.SECONDS));
+            if (!locked) {
+                throw new BusinessException("Concurrent fault report in progress for equipmentId="
+                        + request.getEquipmentId() + ", faultLevel=" + request.getFaultLevel());
+            }
+
+            return doReportFault(request, equipment);
+        } finally {
+            if (locked) {
+                try { redisTemplate.delete(lockKey); } catch (Exception e) {
+                    log.error("Failed to release fault report lock [{}]: {}", lockKey, e.getMessage());
+                }
+            }
+        }
+    }
+
+    /**
+     * Internal method that performs the actual fault reporting logic.
+     * Must be called within a Redis lock to prevent concurrent duplicate detection race.
+     */
+    private Fault doReportFault(FaultReportRequest request, Equipment equipment) {
         // 1. Duplicate fault detection: check for same equipment + same fault_level within 5 minutes
         List<Fault> recentFaults = faultMapper.selectRecentByEquipment(request.getEquipmentId(), 5);
         for (Fault recentFault : recentFaults) {
@@ -220,7 +254,7 @@ public class FaultService {
             }
         }
 
-        // 9. Publish FAULT_REPORTED event
+        // 9. Publish FAULT_REPORTED event with deterministic eventId for idempotency
         Map<String, Object> eventPayload = new HashMap<>();
         eventPayload.put("faultId", fault.getId());
         eventPayload.put("faultCode", fault.getFaultCode());
@@ -236,7 +270,9 @@ public class FaultService {
         eventPayload.put("slaDeadline", slaRecord != null ? slaRecord.getSlaDeadline().toString() : null);
         eventPayload.put("purchaseSuggestionCount",
                 preOccupyResult.getShortageParts() != null ? preOccupyResult.getShortageParts().size() : 0);
-        messageQueue.publish(EventType.FAULT_REPORTED.name(), eventPayload);
+        // FIX: Use deterministic eventId based on faultId to prevent duplicate event processing
+        String eventId = "FAULT_REPORTED:" + fault.getId();
+        messageQueue.publishWithId(eventId, EventType.FAULT_REPORTED.name(), eventPayload);
 
         // 10. Audit log
         auditService.log("FAULT", "REPORT", "Fault", fault.getId(), request.getReporter(),

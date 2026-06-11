@@ -24,6 +24,7 @@ public class EmergencyNotificationConsumer implements EventConsumer {
 
     /** Fix: Track processed eventIds for idempotent handling. */
     private final Set<String> processedEvents = ConcurrentHashMap.newKeySet();
+    private static final int MAX_PROCESSED_EVENTS = 5000;
 
     public EmergencyNotificationConsumer(MaintenanceWebSocketHandler wsHandler) {
         this.wsHandler = wsHandler;
@@ -42,7 +43,7 @@ public class EmergencyNotificationConsumer implements EventConsumer {
             log.info("Skipping duplicate event [{}] eventId=[{}]", event.getEventType(), event.getEventId());
             return;
         }
-
+        evictIfNeeded();
         try {
             String eventType = event.getEventType();
             if ("EMERGENCY_ALERT".equals(eventType)) {
@@ -100,6 +101,14 @@ public class EmergencyNotificationConsumer implements EventConsumer {
             alertData.put("message", "严重/紧急故障上报, 请相关人员立即关注!");
 
             wsHandler.broadcast("EMERGENCY_ALERT", alertData);
+        }
+    }
+
+    private void evictIfNeeded() {
+        if (processedEvents.size() > MAX_PROCESSED_EVENTS) {
+            var it = processedEvents.iterator();
+            int toRemove = processedEvents.size() / 2;
+            for (int i = 0; i < toRemove && it.hasNext(); i++) { it.next(); it.remove(); }
         }
     }
 

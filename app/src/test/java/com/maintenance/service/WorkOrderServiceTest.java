@@ -1,5 +1,6 @@
 package com.maintenance.service;
 
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.maintenance.common.BusinessException;
 import com.maintenance.entity.DowntimeRecord;
 import com.maintenance.entity.SparePart;
@@ -176,13 +177,15 @@ class WorkOrderServiceTest {
         WorkOrder order = createWorkOrder(1L, "REPAIRING", 100L, 50L, 10L);
 
         when(workOrderMapper.selectById(1L)).thenReturn(order);
-        when(workOrderMapper.updateById(any())).thenReturn(1);
+        when(workOrderMapper.update(any(), any())).thenReturn(1);
         when(downtimeService.endDowntime(50L, 1L)).thenReturn(new DowntimeRecord());
 
         workOrderService.suspend(1L, "waiting for parts");
 
         // Verify downtime was paused (ended)
         verify(downtimeService).endDowntime(50L, 1L);
+        // Verify SLA was paused
+        verify(slaService).pauseSla(eq(1L), anyString());
         assertEquals("SUSPENDED", order.getStatus());
     }
 
@@ -195,13 +198,15 @@ class WorkOrderServiceTest {
         WorkOrder order = createWorkOrder(1L, "SUSPENDED", 100L, 50L, 10L);
 
         when(workOrderMapper.selectById(1L)).thenReturn(order);
-        when(workOrderMapper.updateById(any())).thenReturn(1);
+        when(workOrderMapper.update(any(), any())).thenReturn(1);
         when(downtimeService.startDowntime(50L, 1L, 10L)).thenReturn(new DowntimeRecord());
 
         workOrderService.resume(1L);
 
         // Verify downtime was restarted
         verify(downtimeService).startDowntime(50L, 1L, 10L);
+        // Verify SLA was resumed
+        verify(slaService).resumeSla(1L);
         assertEquals("REPAIRING", order.getStatus());
     }
 
@@ -224,7 +229,7 @@ class WorkOrderServiceTest {
         part.setUnitPrice(BigDecimal.valueOf(100));
 
         when(workOrderMapper.selectById(1L)).thenReturn(order);
-        when(workOrderMapper.updateById(any())).thenReturn(1);
+        when(workOrderMapper.update(any(), any())).thenReturn(1);
         when(sparePartService.getOccupationsByWorkOrder(1L)).thenReturn(Collections.singletonList(occ));
         when(sparePartService.getById(1L)).thenReturn(part);
         when(workOrderMapper.selectActiveByTechnicianId(100L)).thenReturn(Collections.emptyList());

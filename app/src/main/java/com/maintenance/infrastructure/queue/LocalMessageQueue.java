@@ -62,10 +62,16 @@ public class LocalMessageQueue {
 
     /**
      * Publish with explicit eventId for deduplication.
-     * If an event with the same eventId has already been processed, it will be skipped.
-     * Callers can use this to ensure idempotency when retrying operations.
+     * FIX: Check processedEventIds before enqueuing to prevent duplicate events
+     * from entering the queue in the first place (not just at consumption time).
      */
     public void publishWithId(String eventId, String eventType, Object payload) {
+        // FIX: Pre-enqueue dedup check - if this eventId was already processed, skip entirely
+        if (eventId != null && processedEventIds.contains(eventId)) {
+            log.info("Skipping publish of already-processed event [{}] eventId=[{}]", eventType, eventId);
+            return;
+        }
+
         String jsonPayload;
         try {
             jsonPayload = objectMapper.writeValueAsString(payload);
@@ -156,10 +162,10 @@ public class LocalMessageQueue {
     }
 
     /**
-     * Simple eviction: clear the processed set when it grows too large.
+     * FIX: Synchronized eviction to prevent concurrent calls from evicting too many entries.
      * In a production system, use a TTL-based cache (Caffeine, Guava) instead.
      */
-    private void evictOldEntries() {
+    private synchronized void evictOldEntries() {
         int size = processedEventIds.size();
         if (size > MAX_PROCESSED_EVENTS) {
             // Clear approximately half the entries

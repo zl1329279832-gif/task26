@@ -25,6 +25,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -33,6 +35,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -61,15 +64,20 @@ class FaultServiceTest {
     @Mock private DowntimeService downtimeService;
     @Mock private PredictiveDispatchService predictiveDispatchService;
     @Mock private SlaService slaService;
+    @Mock private RedisTemplate<String, Object> redisTemplate;
+    @Mock private ValueOperations<String, Object> valueOperations;
 
     private FaultService faultService;
 
     @BeforeEach
     void setUp() {
+        lenient().when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+        lenient().when(valueOperations.setIfAbsent(anyString(), anyString(), anyLong(), any(TimeUnit.class)))
+                .thenReturn(true);
         faultService = new FaultService(
                 faultMapper, equipmentMapper, workOrderMapper, sparePartMapper,
                 messageQueue, autoDispatchService, auditService, downtimeService,
-                predictiveDispatchService, slaService);
+                predictiveDispatchService, slaService, redisTemplate);
     }
 
     private FaultReportRequest createRequest(Long equipmentId, int faultLevel) {
@@ -354,7 +362,7 @@ class FaultServiceTest {
         faultService.reportFault(request);
 
         ArgumentCaptor<Object> payloadCaptor = ArgumentCaptor.forClass(Object.class);
-        verify(messageQueue).publish(eq("FAULT_REPORTED"), payloadCaptor.capture());
+        verify(messageQueue).publishWithId(anyString(), eq("FAULT_REPORTED"), payloadCaptor.capture());
 
         Object payload = payloadCaptor.getValue();
         assertNotNull(payload);

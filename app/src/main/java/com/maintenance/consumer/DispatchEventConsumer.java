@@ -34,6 +34,7 @@ public class DispatchEventConsumer implements EventConsumer {
      * Fix: Track processed eventIds to ensure idempotent handling.
      */
     private final Set<String> processedEvents = ConcurrentHashMap.newKeySet();
+    private static final int MAX_PROCESSED_EVENTS = 5000;
 
     public DispatchEventConsumer(MaintenanceWebSocketHandler wsHandler,
                                   TechnicianService technicianService,
@@ -56,6 +57,8 @@ public class DispatchEventConsumer implements EventConsumer {
             log.info("Skipping duplicate event [{}] eventId=[{}]", event.getEventType(), event.getEventId());
             return;
         }
+        // FIX: Evict old entries to prevent unbounded memory growth
+        evictIfNeeded();
 
         try {
             String eventType = event.getEventType();
@@ -154,5 +157,13 @@ public class DispatchEventConsumer implements EventConsumer {
             return ((Number) value).longValue();
         }
         return Long.parseLong(value.toString());
+    }
+
+    private void evictIfNeeded() {
+        if (processedEvents.size() > MAX_PROCESSED_EVENTS) {
+            var it = processedEvents.iterator();
+            int toRemove = processedEvents.size() / 2;
+            for (int i = 0; i < toRemove && it.hasNext(); i++) { it.next(); it.remove(); }
+        }
     }
 }

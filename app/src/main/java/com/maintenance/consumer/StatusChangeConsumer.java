@@ -25,6 +25,7 @@ public class StatusChangeConsumer implements EventConsumer {
 
     /** Fix: Track processed eventIds for idempotent handling. */
     private final Set<String> processedEvents = ConcurrentHashMap.newKeySet();
+    private static final int MAX_PROCESSED_EVENTS = 5000;
 
     public StatusChangeConsumer(MaintenanceWebSocketHandler wsHandler) {
         this.wsHandler = wsHandler;
@@ -46,7 +47,7 @@ public class StatusChangeConsumer implements EventConsumer {
             log.info("Skipping duplicate event [{}] eventId=[{}]", event.getEventType(), event.getEventId());
             return;
         }
-
+        evictIfNeeded();
         try {
             String eventType = event.getEventType();
             switch (eventType) {
@@ -162,6 +163,14 @@ public class StatusChangeConsumer implements EventConsumer {
 
         // 广播关闭通知
         wsHandler.broadcast("WORK_ORDER_CLOSED", notifyData);
+    }
+
+    private void evictIfNeeded() {
+        if (processedEvents.size() > MAX_PROCESSED_EVENTS) {
+            var it = processedEvents.iterator();
+            int toRemove = processedEvents.size() / 2;
+            for (int i = 0; i < toRemove && it.hasNext(); i++) { it.next(); it.remove(); }
+        }
     }
 
     private Long getLongValue(Map<String, Object> map, String key) {

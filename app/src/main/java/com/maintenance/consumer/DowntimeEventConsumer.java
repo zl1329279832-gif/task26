@@ -23,6 +23,7 @@ public class DowntimeEventConsumer implements EventConsumer {
 
     /** Fix: Track processed eventIds for idempotent handling. */
     private final Set<String> processedEvents = ConcurrentHashMap.newKeySet();
+    private static final int MAX_PROCESSED_EVENTS = 5000;
 
     public DowntimeEventConsumer(DowntimeService downtimeService) {
         this.downtimeService = downtimeService;
@@ -41,7 +42,7 @@ public class DowntimeEventConsumer implements EventConsumer {
             log.info("Skipping duplicate event [{}] eventId=[{}]", event.getEventType(), event.getEventId());
             return;
         }
-
+        evictIfNeeded();
         try {
             @SuppressWarnings("unchecked")
             Map<String, Object> payload = objectMapper.readValue(event.getPayload(), Map.class);
@@ -52,6 +53,14 @@ public class DowntimeEventConsumer implements EventConsumer {
         } catch (Exception e) {
             processedEvents.remove(event.getEventId());
             log.error("处理停机兜底事件异常, eventId={}", event.getEventId(), e);
+        }
+    }
+
+    private void evictIfNeeded() {
+        if (processedEvents.size() > MAX_PROCESSED_EVENTS) {
+            var it = processedEvents.iterator();
+            int toRemove = processedEvents.size() / 2;
+            for (int i = 0; i < toRemove && it.hasNext(); i++) { it.next(); it.remove(); }
         }
     }
 

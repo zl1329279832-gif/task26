@@ -67,11 +67,19 @@ public class SlaService {
 
     /**
      * Pause SLA: save remaining time and mark as PAUSED.
+     *
+     * FIX: Guard against concurrent pause calls and already-paused records.
      */
     @Transactional
     public SlaRecord pauseSla(Long workOrderId, String reason) {
         SlaRecord record = slaRecordMapper.selectActiveByWorkOrder(workOrderId);
         if (record == null) {
+            // FIX: Also check if already paused to make this idempotent
+            SlaRecord existing = slaRecordMapper.selectByWorkOrderId(workOrderId);
+            if (existing != null && "PAUSED".equals(existing.getStatus())) {
+                log.info("SLA already paused for workOrder [{}], skipping duplicate pause", workOrderId);
+                return existing;
+            }
             log.warn("No active SLA record found for workOrder [{}], cannot pause", workOrderId);
             return null;
         }
@@ -94,12 +102,13 @@ public class SlaService {
         log.info("SLA paused for workOrder [{}], remaining={}min, reason={}",
                 workOrderId, remainingMinutes, reason);
 
-        // Publish event
+        // Publish event with deterministic eventId
         Map<String, Object> payload = new HashMap<>();
         payload.put("workOrderId", workOrderId);
         payload.put("remainingMinutes", remainingMinutes);
         payload.put("reason", reason);
-        messageQueue.publish(EventType.SLA_PAUSED.name(), payload);
+        String eventId = "SLA_PAUSED:" + workOrderId;
+        messageQueue.publishWithId(eventId, EventType.SLA_PAUSED.name(), payload);
 
         auditService.log("SLA", "PAUSE", "WorkOrder", workOrderId, "SYSTEM",
                 "SLA paused: remaining=" + remainingMinutes + "min, reason=" + reason);
@@ -109,6 +118,8 @@ public class SlaService {
 
     /**
      * Resume SLA: recalculate deadline from remaining time.
+     *
+     * FIX: Guard against concurrent resume calls and already-active records.
      */
     @Transactional
     public SlaRecord resumeSla(Long workOrderId) {
@@ -137,12 +148,13 @@ public class SlaService {
         log.info("SLA resumed for workOrder [{}], new deadline={}, remaining={}min",
                 workOrderId, newDeadline, remainingMinutes);
 
-        // Publish event
+        // Publish event with deterministic eventId
         Map<String, Object> payload = new HashMap<>();
         payload.put("workOrderId", workOrderId);
         payload.put("newDeadline", newDeadline.toString());
         payload.put("remainingMinutes", remainingMinutes);
-        messageQueue.publish(EventType.SLA_RESUMED.name(), payload);
+        String eventId = "SLA_RESUMED:" + workOrderId;
+        messageQueue.publishWithId(eventId, EventType.SLA_RESUMED.name(), payload);
 
         auditService.log("SLA", "RESUME", "WorkOrder", workOrderId, "SYSTEM",
                 "SLA resumed: newDeadline=" + newDeadline + ", remaining=" + remainingMinutes + "min");

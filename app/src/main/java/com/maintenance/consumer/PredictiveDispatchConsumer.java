@@ -36,6 +36,7 @@ public class PredictiveDispatchConsumer implements EventConsumer {
     private final AuditService auditService;
     private final ObjectMapper objectMapper;
     private final Set<String> processedEvents = ConcurrentHashMap.newKeySet();
+    private static final int MAX_PROCESSED_EVENTS = 5000;
 
     public PredictiveDispatchConsumer(MaintenanceWebSocketHandler wsHandler,
                                       AuditService auditService) {
@@ -56,7 +57,7 @@ public class PredictiveDispatchConsumer implements EventConsumer {
                     event.getEventType(), event.getEventId());
             return;
         }
-
+        evictIfNeeded();
         try {
             String eventType = event.getEventType();
             @SuppressWarnings("unchecked")
@@ -153,6 +154,14 @@ public class PredictiveDispatchConsumer implements EventConsumer {
         log.info("SLA已恢复, workOrderId={}, newDeadline={}", workOrderId, newDeadline);
 
         wsHandler.broadcast("SLA_WARNING", payload);
+    }
+
+    private void evictIfNeeded() {
+        if (processedEvents.size() > MAX_PROCESSED_EVENTS) {
+            var it = processedEvents.iterator();
+            int toRemove = processedEvents.size() / 2;
+            for (int i = 0; i < toRemove && it.hasNext(); i++) { it.next(); it.remove(); }
+        }
     }
 
     private Long getLongValue(Map<String, Object> map, String key) {

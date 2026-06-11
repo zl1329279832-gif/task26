@@ -1,5 +1,6 @@
 package com.maintenance.service;
 
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.maintenance.common.BusinessException;
 import com.maintenance.entity.DispatchRecord;
 import com.maintenance.entity.DowntimeRecord;
@@ -89,11 +90,15 @@ public class WorkOrderService {
                     + " to " + targetStatus.name());
         }
 
-        // 1. Update work order status
+        // 1. FIX: CAS-style state transition to prevent concurrent accept
         order.setStatus(targetStatus.name());
         order.setAcceptedAt(LocalDateTime.now());
         order.setUpdatedAt(LocalDateTime.now());
-        workOrderMapper.updateById(order);
+        int rows = casUpdateStatus(workOrderId, currentStatus.name(), order);
+        if (rows == 0) {
+            throw new BusinessException("Concurrent status change detected for workOrder "
+                    + workOrderId + ", expected status=" + currentStatus.name());
+        }
 
         // 2. Update dispatch record
         DispatchRecord dispatchRecord = dispatchRecordMapper.selectLatestByWorkOrder(workOrderId);
@@ -136,7 +141,11 @@ public class WorkOrderService {
         order.setStatus(targetStatus.name());
         order.setArrivedAt(LocalDateTime.now());
         order.setUpdatedAt(LocalDateTime.now());
-        workOrderMapper.updateById(order);
+        int rows = casUpdateStatus(workOrderId, currentStatus.name(), order);
+        if (rows == 0) {
+            throw new BusinessException("Concurrent status change detected for workOrder "
+                    + workOrderId + ", expected status=" + currentStatus.name());
+        }
 
         publishStatusChange(order, currentStatus.name(), targetStatus.name());
 
@@ -163,7 +172,11 @@ public class WorkOrderService {
 
         order.setStatus(targetStatus.name());
         order.setUpdatedAt(LocalDateTime.now());
-        workOrderMapper.updateById(order);
+        int rows = casUpdateStatus(workOrderId, currentStatus.name(), order);
+        if (rows == 0) {
+            throw new BusinessException("Concurrent status change detected for workOrder "
+                    + workOrderId + ", expected status=" + currentStatus.name());
+        }
 
         publishStatusChange(order, currentStatus.name(), targetStatus.name());
 
@@ -193,12 +206,20 @@ public class WorkOrderService {
         order.setStatus(targetStatus.name());
         order.setSuspendedAt(LocalDateTime.now());
         order.setUpdatedAt(LocalDateTime.now());
-        workOrderMapper.updateById(order);
+        int rows = casUpdateStatus(workOrderId, currentStatus.name(), order);
+        if (rows == 0) {
+            throw new BusinessException("Concurrent status change detected for workOrder "
+                    + workOrderId + ", expected status=" + currentStatus.name());
+        }
 
         // FIX: Pause downtime record when suspending (end the active record;
         // a new one will be created on resume if needed)
         downtimeService.endDowntime(order.getEquipmentId(), workOrderId);
         log.info("Downtime paused for workOrder [{}] due to suspension", workOrderId);
+
+        // FIX: Coordinate SLA pause with suspend to keep SLA and work order status consistent
+        slaService.pauseSla(workOrderId, "工单暂停: " + reason);
+        log.info("SLA paused for workOrder [{}] due to suspension", workOrderId);
 
         publishStatusChange(order, currentStatus.name(), targetStatus.name());
 
@@ -227,11 +248,19 @@ public class WorkOrderService {
 
         order.setStatus(targetStatus.name());
         order.setUpdatedAt(LocalDateTime.now());
-        workOrderMapper.updateById(order);
+        int rows = casUpdateStatus(workOrderId, currentStatus.name(), order);
+        if (rows == 0) {
+            throw new BusinessException("Concurrent status change detected for workOrder "
+                    + workOrderId + ", expected status=" + currentStatus.name());
+        }
 
         // FIX: Restart downtime record when resuming from suspension
         downtimeService.startDowntime(order.getEquipmentId(), workOrderId, order.getFaultId());
         log.info("Downtime restarted for workOrder [{}] on resume", workOrderId);
+
+        // FIX: Coordinate SLA resume with work order resume to keep status consistent
+        slaService.resumeSla(workOrderId);
+        log.info("SLA resumed for workOrder [{}] on resume", workOrderId);
 
         publishStatusChange(order, currentStatus.name(), targetStatus.name());
 
@@ -260,7 +289,7 @@ public class WorkOrderService {
                     + " to " + targetStatus.name());
         }
 
-        // 2. Update work order status and completion details
+        // 2. FIX: CAS-style state transition to prevent concurrent complete
         order.setStatus(targetStatus.name());
         order.setCompletedAt(LocalDateTime.now());
         order.setRepairNotes(repairNotes);
@@ -283,7 +312,12 @@ public class WorkOrderService {
             }
         }
         order.setPartsCost(totalPartsCost);
-        workOrderMapper.updateById(order);
+        // FIX: CAS-style update to prevent concurrent complete
+        int rows = casUpdateStatus(workOrderId, currentStatus.name(), order);
+        if (rows == 0) {
+            throw new BusinessException("Concurrent status change detected for workOrder "
+                    + workOrderId + ", expected status=" + currentStatus.name());
+        }
 
         // 5. Update technician workload(-1) and availability
         if (order.getTechnicianId() != null) {
@@ -306,7 +340,7 @@ public class WorkOrderService {
         // 8. Update equipment status to RUNNING
         equipmentMapper.updateStatus(order.getEquipmentId(), EquipmentStatus.RUNNING.name());
 
-        // 9. Publish REPAIR_COMPLETED event
+        // 9. Publish REPAIR_COMPLETED event with deterministic eventId
         Map<String, Object> eventPayload = new HashMap<>();
         eventPayload.put("workOrderId", workOrderId);
         eventPayload.put("orderCode", order.getOrderCode());
@@ -314,7 +348,8 @@ public class WorkOrderService {
         eventPayload.put("technicianId", order.getTechnicianId());
         eventPayload.put("partsCost", totalPartsCost);
         eventPayload.put("laborCost", laborCost);
-        messageQueue.publish(EventType.REPAIR_COMPLETED.name(), eventPayload);
+        String completeEventId = "REPAIR_COMPLETED:" + workOrderId;
+        messageQueue.publishWithId(completeEventId, EventType.REPAIR_COMPLETED.name(), eventPayload);
 
         // 10. Audit log
         auditService.log("WORK_ORDER", "COMPLETE", "WorkOrder", workOrderId, "SYSTEM",
@@ -377,8 +412,9 @@ public class WorkOrderService {
         order.setUpdatedAt(LocalDateTime.now());
         workOrderMapper.updateById(order);
 
-        // 3. Release spare parts occupied by the old work order (including pre-occupied)
-        predictiveDispatchService.releasePreOccupiedParts(workOrderId);
+        // 3. FIX: Release spare parts - use direct service call that propagates failures
+        // instead of releasePreOccupiedParts which silently catches exceptions.
+        // This ensures that if release fails, the entire reassign transaction rolls back.
         sparePartService.releaseOccupationsByWorkOrder(workOrderId);
 
         // 4. Old technician: workload-1, check availability
@@ -411,14 +447,15 @@ public class WorkOrderService {
         // 7. New technician: workload+1
         technicianService.incrementWorkload(newTechnicianId);
 
-        // 8. Publish WORK_ORDER_REASSIGNED event
+        // 8. Publish WORK_ORDER_REASSIGNED event with deterministic eventId
         Map<String, Object> eventPayload = new HashMap<>();
         eventPayload.put("workOrderId", workOrderId);
         eventPayload.put("orderCode", order.getOrderCode());
         eventPayload.put("oldTechnicianId", oldTechnicianId);
         eventPayload.put("newTechnicianId", newTechnicianId);
         eventPayload.put("reason", reason);
-        messageQueue.publish(EventType.WORK_ORDER_REASSIGNED.name(), eventPayload);
+        String reassignEventId = "WORK_ORDER_REASSIGNED:" + workOrderId + ":" + order.getReassignCount();
+        messageQueue.publishWithId(reassignEventId, EventType.WORK_ORDER_REASSIGNED.name(), eventPayload);
 
         // 9. Audit log with reason
         auditService.log("WORK_ORDER", "REASSIGN", "WorkOrder", workOrderId, "SYSTEM",
@@ -459,14 +496,15 @@ public class WorkOrderService {
                     workOrderId, escalateCount + 1);
         }
 
-        // Publish WORK_ORDER_ESCALATED event
+        // Publish WORK_ORDER_ESCALATED event with deterministic eventId
         Map<String, Object> eventPayload = new HashMap<>();
         eventPayload.put("workOrderId", workOrderId);
         eventPayload.put("orderCode", order.getOrderCode());
         eventPayload.put("oldPriority", currentPriority);
         eventPayload.put("newPriority", order.getPriority());
         eventPayload.put("escalateCount", order.getEscalateCount());
-        messageQueue.publish(EventType.WORK_ORDER_ESCALATED.name(), eventPayload);
+        String escalateEventId = "WORK_ORDER_ESCALATED:" + workOrderId + ":" + order.getEscalateCount();
+        messageQueue.publishWithId(escalateEventId, EventType.WORK_ORDER_ESCALATED.name(), eventPayload);
 
         // Audit log
         auditService.log("WORK_ORDER", "ESCALATE", "WorkOrder", workOrderId, "SYSTEM",
@@ -487,8 +525,7 @@ public class WorkOrderService {
         WorkOrder order = getAndValidate(workOrderId);
         String oldStatus = order.getStatus();
 
-        // 1. Release spare parts occupation (including pre-occupied)
-        predictiveDispatchService.releasePreOccupiedParts(workOrderId);
+        // 1. FIX: Release spare parts - use direct service call that propagates failures
         sparePartService.releaseOccupationsByWorkOrder(workOrderId);
 
         // 2. Release technician (workload-1)
@@ -519,13 +556,14 @@ public class WorkOrderService {
         // 5b. Finalize SLA (mark as expired since work order was abnormally closed)
         slaService.finalizeSla(workOrderId);
 
-        // 6. Publish WORK_ORDER_CLOSED event
+        // 6. Publish WORK_ORDER_CLOSED event with deterministic eventId
         Map<String, Object> eventPayload = new HashMap<>();
         eventPayload.put("workOrderId", workOrderId);
         eventPayload.put("orderCode", order.getOrderCode());
         eventPayload.put("previousStatus", oldStatus);
         eventPayload.put("reason", reason);
-        messageQueue.publish(EventType.WORK_ORDER_CLOSED.name(), eventPayload);
+        String closedEventId = "WORK_ORDER_CLOSED:" + workOrderId;
+        messageQueue.publishWithId(closedEventId, EventType.WORK_ORDER_CLOSED.name(), eventPayload);
 
         // 7. Audit log
         auditService.log("WORK_ORDER", "CLOSE_ABNORMAL", "WorkOrder", workOrderId, "SYSTEM",
@@ -574,7 +612,7 @@ public class WorkOrderService {
     }
 
     /**
-     * Publish a STATUS_CHANGED event.
+     * Publish a STATUS_CHANGED event with deterministic eventId.
      */
     private void publishStatusChange(WorkOrder order, String oldStatus, String newStatus) {
         Map<String, Object> eventPayload = new HashMap<>();
@@ -584,7 +622,8 @@ public class WorkOrderService {
         eventPayload.put("newStatus", newStatus);
         eventPayload.put("technicianId", order.getTechnicianId());
         eventPayload.put("equipmentId", order.getEquipmentId());
-        messageQueue.publish(EventType.STATUS_CHANGED.name(), eventPayload);
+        String eventId = "STATUS_CHANGED:" + order.getId() + ":" + oldStatus + ":" + newStatus;
+        messageQueue.publishWithId(eventId, EventType.STATUS_CHANGED.name(), eventPayload);
     }
 
     /**
@@ -596,5 +635,17 @@ public class WorkOrderService {
             throw new BusinessException("Work order not found, workOrderId=" + workOrderId);
         }
         return order;
+    }
+
+    /**
+     * FIX: CAS-style state transition update.
+     * Uses SQL WHERE condition on both id AND current status to prevent concurrent
+     * state transitions. Returns the number of affected rows (0 = conflict detected).
+     */
+    private int casUpdateStatus(Long workOrderId, String expectedStatus, WorkOrder updateEntity) {
+        LambdaUpdateWrapper<WorkOrder> wrapper = new LambdaUpdateWrapper<>();
+        wrapper.eq(WorkOrder::getId, workOrderId)
+                .eq(WorkOrder::getStatus, expectedStatus);
+        return workOrderMapper.update(updateEntity, wrapper);
     }
 }

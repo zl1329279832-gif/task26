@@ -26,6 +26,7 @@ public class PartEventConsumer implements EventConsumer {
 
     /** Fix: Track processed eventIds for idempotent handling. */
     private final Set<String> processedEvents = ConcurrentHashMap.newKeySet();
+    private static final int MAX_PROCESSED_EVENTS = 5000;
 
     public PartEventConsumer(MaintenanceWebSocketHandler wsHandler, AuditService auditService) {
         this.wsHandler = wsHandler;
@@ -47,7 +48,7 @@ public class PartEventConsumer implements EventConsumer {
             log.info("Skipping duplicate event [{}] eventId=[{}]", event.getEventType(), event.getEventId());
             return;
         }
-
+        evictIfNeeded();
         try {
             String eventType = event.getEventType();
             switch (eventType) {
@@ -142,6 +143,14 @@ public class PartEventConsumer implements EventConsumer {
             notifyData.put("message", "备件已释放");
 
             wsHandler.sendToTechnician(technicianId, "PART_RELEASED", notifyData);
+        }
+    }
+
+    private void evictIfNeeded() {
+        if (processedEvents.size() > MAX_PROCESSED_EVENTS) {
+            var it = processedEvents.iterator();
+            int toRemove = processedEvents.size() / 2;
+            for (int i = 0; i < toRemove && it.hasNext(); i++) { it.next(); it.remove(); }
         }
     }
 

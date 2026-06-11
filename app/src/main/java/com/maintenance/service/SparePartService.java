@@ -16,6 +16,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -62,6 +63,19 @@ public class SparePartService {
                 throw new BusinessException("Failed to acquire part lock, partId=" + partId);
             }
 
+            // FIX: Idempotent guard - check if this workOrder+partId is already occupied
+            List<SparePartOccupation> existing = sparePartOccupationMapper.selectByWorkOrderAndStatus(
+                    workOrderId, OccupationStatus.OCCUPIED.name());
+            if (existing != null) {
+                for (SparePartOccupation occ : existing) {
+                    if (partId.equals(occ.getPartId())) {
+                        log.warn("Part [{}] already occupied for workOrder [{}], returning existing occupation",
+                                partId, workOrderId);
+                        return occ;
+                    }
+                }
+            }
+
             // 2. Check stock availability
             SparePart part = sparePartMapper.selectById(partId);
             if (part == null) {
@@ -89,7 +103,7 @@ public class SparePartService {
             log.info("Spare part occupied: workOrder={}, part={}, qty={}, id={}",
                     workOrderId, partId, quantity, occupation.getId());
 
-            // 5. Publish PART_REQUESTED event
+            // 5. Publish PART_REQUESTED event with deterministic eventId
             Map<String, Object> eventPayload = new HashMap<>();
             eventPayload.put("workOrderId", workOrderId);
             eventPayload.put("partId", partId);
@@ -97,7 +111,8 @@ public class SparePartService {
             eventPayload.put("partName", part.getPartName());
             eventPayload.put("quantity", quantity);
             eventPayload.put("occupationId", occupation.getId());
-            messageQueue.publish(EventType.PART_REQUESTED.name(), eventPayload);
+            String eventId = "PART_REQUESTED:" + workOrderId + ":" + partId;
+            messageQueue.publishWithId(eventId, EventType.PART_REQUESTED.name(), eventPayload);
 
             // 6. Audit log
             auditService.log("SPARE_PART", "OCCUPY", "WorkOrder", workOrderId, "SYSTEM",
@@ -122,18 +137,26 @@ public class SparePartService {
             throw new BusinessException("Part occupation not found, id=" + occupationId);
         }
 
+        // FIX: Guard against consuming non-OCCUPIED records (already CONSUMED or RELEASED)
+        if (!OccupationStatus.OCCUPIED.name().equals(occupation.getStatus())) {
+            log.warn("Part occupation [{}] is not OCCUPIED (status={}), skipping consume",
+                    occupationId, occupation.getStatus());
+            return;
+        }
+
         // Update status to CONSUMED, set consumed_at
         sparePartOccupationMapper.updateStatus(occupationId, OccupationStatus.CONSUMED.name(), LocalDateTime.now());
         log.info("Spare part consumed: occupationId={}, workOrder={}, partId={}",
                 occupationId, occupation.getWorkOrderId(), occupation.getPartId());
 
-        // Publish PART_CONSUMED event
+        // Publish PART_CONSUMED event with deterministic eventId
         Map<String, Object> eventPayload = new HashMap<>();
         eventPayload.put("occupationId", occupationId);
         eventPayload.put("workOrderId", occupation.getWorkOrderId());
         eventPayload.put("partId", occupation.getPartId());
         eventPayload.put("quantity", occupation.getQuantity());
-        messageQueue.publish(EventType.PART_CONSUMED.name(), eventPayload);
+        String eventId = "PART_CONSUMED:" + occupationId;
+        messageQueue.publishWithId(eventId, EventType.PART_CONSUMED.name(), eventPayload);
 
         // Audit log
         auditService.log("SPARE_PART", "CONSUME", "WorkOrder", occupation.getWorkOrderId(), "SYSTEM",
@@ -159,6 +182,11 @@ public class SparePartService {
             return;
         }
 
+        // FIX: Collect events and publish after ALL releases succeed.
+        // If any release fails, the transaction rolls back and no events are published,
+        // preventing orphaned events that don't match the actual DB state.
+        List<Map<String, Object>> deferredEvents = new ArrayList<>();
+
         for (SparePartOccupation occupation : occupiedList) {
             String lockKey = PART_LOCK_PREFIX + occupation.getPartId();
             boolean locked = false;
@@ -183,13 +211,13 @@ public class SparePartService {
                 log.info("Spare part released: occupationId={}, partId={}, qty={}",
                         occupation.getId(), occupation.getPartId(), occupation.getQuantity());
 
-                // 5. Publish PART_RELEASED event
+                // 5. Defer PART_RELEASED event (publish after all succeed)
                 Map<String, Object> eventPayload = new HashMap<>();
                 eventPayload.put("occupationId", occupation.getId());
                 eventPayload.put("workOrderId", workOrderId);
                 eventPayload.put("partId", occupation.getPartId());
                 eventPayload.put("quantity", occupation.getQuantity());
-                messageQueue.publish(EventType.PART_RELEASED.name(), eventPayload);
+                deferredEvents.add(eventPayload);
             } finally {
                 if (locked) {
                     unlock(lockKey);
@@ -197,7 +225,13 @@ public class SparePartService {
             }
         }
 
-        // 6. Audit log
+        // 6. Publish all deferred PART_RELEASED events after all releases succeeded
+        for (Map<String, Object> eventPayload : deferredEvents) {
+            String eventId = "PART_RELEASED:" + workOrderId + ":" + eventPayload.get("partId");
+            messageQueue.publishWithId(eventId, EventType.PART_RELEASED.name(), eventPayload);
+        }
+
+        // 7. Audit log
         auditService.log("SPARE_PART", "RELEASE_ALL", "WorkOrder", workOrderId, "SYSTEM",
                 "All occupations released, count=" + occupiedList.size());
     }

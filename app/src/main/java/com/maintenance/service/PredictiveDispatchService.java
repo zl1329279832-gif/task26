@@ -95,8 +95,19 @@ public class PredictiveDispatchService {
     /**
      * Generate multiple dispatch plans with multi-dimensional scoring.
      * Returns top candidates ranked by total score with recommendation reasons.
+     *
+     * FIX: Added @Transactional to prevent partial plan inserts on mid-loop failure.
      */
+    @Transactional
     public List<DispatchPlan> generateDispatchPlans(WorkOrder workOrder, Fault fault, Equipment equipment) {
+        // FIX: Idempotent guard - check if plans already exist for this work order
+        List<DispatchPlan> existingPlans = dispatchPlanMapper.selectByWorkOrderId(workOrder.getId());
+        if (existingPlans != null && !existingPlans.isEmpty()) {
+            log.warn("Dispatch plans already exist for workOrder [{}], returning existing {} plans",
+                    workOrder.getId(), existingPlans.size());
+            return existingPlans;
+        }
+
         List<Technician> allTechnicians = technicianMapper.selectList(null);
         if (allTechnicians == null || allTechnicians.isEmpty()) {
             log.warn("No technicians available for dispatch plan generation");
@@ -200,13 +211,14 @@ public class PredictiveDispatchService {
                 plans.size(), workOrder.getId(),
                 plans.isEmpty() ? "N/A" : plans.get(0).getTotalScore());
 
-        // Publish event
+        // Publish event with deterministic eventId
         Map<String, Object> payload = new HashMap<>();
         payload.put("workOrderId", workOrder.getId());
         payload.put("faultId", fault.getId());
         payload.put("planCount", plans.size());
         payload.put("recommendedPlanIndex", plans.isEmpty() ? null : plans.get(0).getPlanIndex());
-        messageQueue.publish(EventType.DISPATCH_PLANS_GENERATED.name(), payload);
+        String eventId = "DISPATCH_PLANS_GENERATED:" + workOrder.getId();
+        messageQueue.publishWithId(eventId, EventType.DISPATCH_PLANS_GENERATED.name(), payload);
 
         auditService.log("DISPATCH", "GENERATE_PLANS", "WorkOrder", workOrder.getId(), "SYSTEM",
                 "Generated " + plans.size() + " dispatch plans, best score="
@@ -221,6 +233,21 @@ public class PredictiveDispatchService {
      */
     @Transactional
     public PreOccupyResult preOccupyParts(Long workOrderId, String equipmentType, int faultLevel) {
+        // FIX: Idempotent guard - check if parts are already pre-occupied for this work order
+        List<SparePartOccupation> existingOccupations = sparePartService.getOccupationsByWorkOrder(workOrderId);
+        if (existingOccupations != null && !existingOccupations.isEmpty()) {
+            log.warn("Parts already pre-occupied for workOrder [{}], returning existing result", workOrderId);
+            List<SparePartOccupation> occupied = existingOccupations.stream()
+                    .filter(o -> "OCCUPIED".equals(o.getStatus()))
+                    .toList();
+            return PreOccupyResult.builder()
+                    .workOrderId(workOrderId)
+                    .occupiedParts(occupied)
+                    .shortageParts(new ArrayList<>())
+                    .allPartsAvailable(true)
+                    .build();
+        }
+
         List<SparePart> applicableParts = sparePartMapper.selectByEquipmentType(equipmentType);
         List<SparePartOccupation> occupiedParts = new ArrayList<>();
         List<PurchaseSuggestion> shortageParts = new ArrayList<>();
@@ -285,13 +312,14 @@ public class PredictiveDispatchService {
 
         boolean allAvailable = shortageParts.isEmpty();
 
-        // Publish pre-occupation event
+        // Publish pre-occupation event with deterministic eventId
         Map<String, Object> payload = new HashMap<>();
         payload.put("workOrderId", workOrderId);
         payload.put("occupiedCount", occupiedParts.size());
         payload.put("shortageCount", shortageParts.size());
         payload.put("allPartsAvailable", allAvailable);
-        messageQueue.publish(EventType.PARTS_PRE_OCCUPIED.name(), payload);
+        String preOccupyEventId = "PARTS_PRE_OCCUPIED:" + workOrderId;
+        messageQueue.publishWithId(preOccupyEventId, EventType.PARTS_PRE_OCCUPIED.name(), payload);
 
         auditService.log("SPARE_PART", "PRE_OCCUPY", "WorkOrder", workOrderId, "SYSTEM",
                 "Pre-occupied " + occupiedParts.size() + " parts, "
@@ -316,7 +344,8 @@ public class PredictiveDispatchService {
 
             Map<String, Object> payload = new HashMap<>();
             payload.put("workOrderId", workOrderId);
-            messageQueue.publish(EventType.PARTS_PRE_RELEASED.name(), payload);
+            String releaseEventId = "PARTS_PRE_RELEASED:" + workOrderId;
+            messageQueue.publishWithId(releaseEventId, EventType.PARTS_PRE_RELEASED.name(), payload);
         } catch (BusinessException e) {
             log.error("Failed to release pre-occupied parts for workOrder [{}]: {}",
                     workOrderId, e.getMessage());
@@ -325,9 +354,26 @@ public class PredictiveDispatchService {
 
     /**
      * Select and execute a specific dispatch plan.
+     *
+     * FIX: Added idempotent guard to prevent duplicate dispatch records
+     * when called concurrently for the same workOrderId.
      */
     @Transactional
     public DispatchResult selectAndExecutePlan(Long workOrderId, int planIndex) {
+        // FIX: Idempotent guard - check if a dispatch record already exists for this work order
+        DispatchRecord existingRecord = dispatchRecordMapper.selectLatestByWorkOrder(workOrderId);
+        if (existingRecord != null) {
+            log.warn("Dispatch record already exists for workOrder [{}], skipping duplicate execution", workOrderId);
+            WorkOrder existingWo = workOrderMapper.selectById(workOrderId);
+            Technician existingTech = technicianService.getById(existingRecord.getTechnicianId());
+            return DispatchResult.success(workOrderId,
+                    existingWo != null ? existingWo.getOrderCode() : null,
+                    existingRecord.getTechnicianId(),
+                    existingTech != null ? existingTech.getName() : null,
+                    existingRecord.getDispatchScore(),
+                    existingRecord.getDispatchType());
+        }
+
         List<DispatchPlan> plans = dispatchPlanMapper.selectByWorkOrderId(workOrderId);
         DispatchPlan selectedPlan = null;
         for (DispatchPlan plan : plans) {
@@ -383,7 +429,7 @@ public class PredictiveDispatchService {
         // Update technician workload
         technicianService.incrementWorkload(selectedPlan.getTechnicianId());
 
-        // Publish DISPATCH_DONE event
+        // Publish DISPATCH_DONE event with deterministic eventId
         Map<String, Object> payload = new HashMap<>();
         payload.put("workOrderId", workOrderId);
         payload.put("orderCode", workOrder.getOrderCode());
@@ -392,7 +438,8 @@ public class PredictiveDispatchService {
         payload.put("dispatchScore", selectedPlan.getTotalScore());
         payload.put("dispatchType", DispatchType.AUTO.name());
         payload.put("planIndex", planIndex);
-        messageQueue.publish(EventType.DISPATCH_DONE.name(), payload);
+        String dispatchEventId = "DISPATCH_DONE:" + workOrderId + ":" + planIndex;
+        messageQueue.publishWithId(dispatchEventId, EventType.DISPATCH_DONE.name(), payload);
 
         auditService.log("DISPATCH", "EXECUTE_PLAN", "WorkOrder", workOrderId, "SYSTEM",
                 "Executed dispatch plan#" + planIndex + ": technician=" + tech.getName()
@@ -430,7 +477,7 @@ public class PredictiveDispatchService {
 
         purchaseSuggestionMapper.insert(suggestion);
 
-        // Publish event
+        // Publish event with deterministic eventId
         Map<String, Object> payload = new HashMap<>();
         payload.put("workOrderId", workOrderId);
         payload.put("partId", part.getId());
@@ -438,7 +485,8 @@ public class PredictiveDispatchService {
         payload.put("partName", part.getPartName());
         payload.put("shortage", shortage);
         payload.put("urgency", suggestion.getUrgency());
-        messageQueue.publish(EventType.PURCHASE_SUGGESTED.name(), payload);
+        String purchaseEventId = "PURCHASE_SUGGESTED:" + workOrderId + ":" + part.getId();
+        messageQueue.publishWithId(purchaseEventId, EventType.PURCHASE_SUGGESTED.name(), payload);
 
         auditService.log("SPARE_PART", "PURCHASE_SUGGESTION", "WorkOrder", workOrderId, "SYSTEM",
                 "Purchase suggestion created: part=" + part.getPartCode()

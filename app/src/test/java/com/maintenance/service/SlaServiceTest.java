@@ -111,7 +111,7 @@ class SlaServiceTest {
         assertEquals("PAUSED", result.getStatus());
         assertNotNull(result.getPauseReason());
         assertTrue(result.getPauseReason().contains("waiting for parts"));
-        verify(messageQueue).publish(eq("SLA_PAUSED"), any());
+        verify(messageQueue).publishWithId(anyString(), eq("SLA_PAUSED"), any());
     }
 
     // ========================================================
@@ -151,7 +151,7 @@ class SlaServiceTest {
         // New deadline should be ~60 minutes from now
         assertTrue(result.getSlaDeadline().isAfter(LocalDateTime.now().plusMinutes(55)));
         assertTrue(result.getSlaDeadline().isBefore(LocalDateTime.now().plusMinutes(65)));
-        verify(messageQueue).publish(eq("SLA_RESUMED"), any());
+        verify(messageQueue).publishWithId(anyString(), eq("SLA_RESUMED"), any());
     }
 
     // ========================================================

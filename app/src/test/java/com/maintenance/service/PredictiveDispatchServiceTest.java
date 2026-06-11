@@ -182,7 +182,7 @@ class PredictiveDispatchServiceTest {
         }
 
         // Event should be published
-        verify(messageQueue).publish(eq("DISPATCH_PLANS_GENERATED"), any());
+        verify(messageQueue).publishWithId(anyString(), eq("DISPATCH_PLANS_GENERATED"), any());
     }
 
     // ========================================================
@@ -236,7 +236,7 @@ class PredictiveDispatchServiceTest {
         assertTrue(result.isAllPartsAvailable(), "All parts should be available");
         assertEquals(1, result.getOccupiedParts().size());
         assertTrue(result.getShortageParts().isEmpty());
-        verify(messageQueue).publish(eq("PARTS_PRE_OCCUPIED"), any());
+        verify(messageQueue).publishWithId(anyString(), eq("PARTS_PRE_OCCUPIED"), any());
     }
 
     // ========================================================
@@ -264,7 +264,7 @@ class PredictiveDispatchServiceTest {
         assertFalse(result.isAllPartsAvailable(), "Parts should not all be available");
         assertEquals(1, result.getShortageParts().size());
         assertEquals("P001", result.getShortageParts().get(0).getPartCode());
-        verify(messageQueue).publish(eq("PURCHASE_SUGGESTED"), any());
+        verify(messageQueue).publishWithId(anyString(), eq("PURCHASE_SUGGESTED"), any());
     }
 
     // ========================================================
@@ -298,7 +298,7 @@ class PredictiveDispatchServiceTest {
         assertEquals(100L, result.getTechnicianId());
         verify(technicianService).incrementWorkload(100L);
         verify(dispatchPlanMapper).updateSelected(1L);
-        verify(messageQueue).publish(eq("DISPATCH_DONE"), any());
+        verify(messageQueue).publishWithId(anyString(), eq("DISPATCH_DONE"), any());
     }
 
     // ========================================================
@@ -334,7 +334,7 @@ class PredictiveDispatchServiceTest {
         service.releasePreOccupiedParts(1L);
 
         verify(sparePartService).releaseOccupationsByWorkOrder(1L);
-        verify(messageQueue).publish(eq("PARTS_PRE_RELEASED"), any());
+        verify(messageQueue).publishWithId(anyString(), eq("PARTS_PRE_RELEASED"), any());
     }
 
     // ========================================================
