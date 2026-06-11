@@ -7,6 +7,7 @@ import com.maintenance.entity.TechnicianSkill;
 import com.maintenance.entity.WorkOrder;
 import com.maintenance.enums.TechnicianAvailability;
 import com.maintenance.infrastructure.queue.LocalMessageQueue;
+import com.maintenance.infrastructure.queue.TransactionAwareEventPublisher;
 import com.maintenance.mapper.DispatchRecordMapper;
 import com.maintenance.mapper.TechnicianMapper;
 import com.maintenance.mapper.TechnicianSkillMapper;
@@ -42,6 +43,7 @@ class AutoDispatchServiceTest {
     @Mock private WorkOrderMapper workOrderMapper;
     @Mock private DispatchRecordMapper dispatchRecordMapper;
     @Mock private LocalMessageQueue messageQueue;
+    @Mock private TransactionAwareEventPublisher txPublisher;
     @Mock private AuditService auditService;
     @Mock private TechnicianService technicianService;
     @Mock private MaintenanceWebSocketHandler webSocketHandler;
@@ -52,7 +54,7 @@ class AutoDispatchServiceTest {
     void setUp() {
         autoDispatchService = new AutoDispatchService(
                 technicianMapper, technicianSkillMapper, workOrderMapper,
-                dispatchRecordMapper, messageQueue, auditService,
+                dispatchRecordMapper, messageQueue, txPublisher, auditService,
                 technicianService, webSocketHandler);
     }
 
@@ -208,7 +210,7 @@ class AutoDispatchServiceTest {
         assertTrue(result.isSuccess());
         assertEquals(1L, result.getTechnicianId());
         verify(technicianService).incrementWorkload(1L);
-        verify(messageQueue).publish(eq("DISPATCH_DONE"), any());
+        verify(txPublisher).publish(eq("DISPATCH_DONE"), any());
     }
 
     // ========================================================

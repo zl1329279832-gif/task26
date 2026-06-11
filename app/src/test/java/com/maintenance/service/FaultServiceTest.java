@@ -14,6 +14,7 @@ import com.maintenance.entity.SparePart;
 import com.maintenance.entity.SparePartOccupation;
 import com.maintenance.entity.WorkOrder;
 import com.maintenance.infrastructure.queue.LocalMessageQueue;
+import com.maintenance.infrastructure.queue.TransactionAwareEventPublisher;
 import com.maintenance.mapper.EquipmentMapper;
 import com.maintenance.mapper.FaultMapper;
 import com.maintenance.mapper.SparePartMapper;
@@ -56,6 +57,7 @@ class FaultServiceTest {
     @Mock private WorkOrderMapper workOrderMapper;
     @Mock private SparePartMapper sparePartMapper;
     @Mock private LocalMessageQueue messageQueue;
+    @Mock private TransactionAwareEventPublisher txPublisher;
     @Mock private AutoDispatchService autoDispatchService;
     @Mock private AuditService auditService;
     @Mock private DowntimeService downtimeService;
@@ -68,7 +70,7 @@ class FaultServiceTest {
     void setUp() {
         faultService = new FaultService(
                 faultMapper, equipmentMapper, workOrderMapper, sparePartMapper,
-                messageQueue, autoDispatchService, auditService, downtimeService,
+                messageQueue, txPublisher, autoDispatchService, auditService, downtimeService,
                 predictiveDispatchService, slaService);
     }
 
@@ -354,7 +356,7 @@ class FaultServiceTest {
         faultService.reportFault(request);
 
         ArgumentCaptor<Object> payloadCaptor = ArgumentCaptor.forClass(Object.class);
-        verify(messageQueue).publish(eq("FAULT_REPORTED"), payloadCaptor.capture());
+        verify(txPublisher).publish(eq("FAULT_REPORTED"), payloadCaptor.capture());
 
         Object payload = payloadCaptor.getValue();
         assertNotNull(payload);

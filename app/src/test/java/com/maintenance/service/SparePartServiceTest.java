@@ -4,6 +4,7 @@ import com.maintenance.common.BusinessException;
 import com.maintenance.entity.SparePartOccupation;
 import com.maintenance.enums.OccupationStatus;
 import com.maintenance.infrastructure.queue.LocalMessageQueue;
+import com.maintenance.infrastructure.queue.TransactionAwareEventPublisher;
 import com.maintenance.mapper.SparePartMapper;
 import com.maintenance.mapper.SparePartOccupationMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -37,6 +38,7 @@ class SparePartServiceTest {
     @Mock private RedisTemplate<String, Object> redisTemplate;
     @Mock private ValueOperations<String, Object> valueOperations;
     @Mock private LocalMessageQueue messageQueue;
+    @Mock private TransactionAwareEventPublisher txPublisher;
     @Mock private AuditService auditService;
 
     private SparePartService sparePartService;
@@ -45,7 +47,7 @@ class SparePartServiceTest {
     void setUp() {
         sparePartService = new SparePartService(
                 sparePartMapper, sparePartOccupationMapper, redisTemplate,
-                messageQueue, auditService);
+                messageQueue, txPublisher, auditService);
         lenient().when(redisTemplate.opsForValue()).thenReturn(valueOperations);
     }
 

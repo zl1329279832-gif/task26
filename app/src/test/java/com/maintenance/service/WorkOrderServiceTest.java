@@ -9,6 +9,7 @@ import com.maintenance.entity.WorkOrder;
 import com.maintenance.enums.OccupationStatus;
 import com.maintenance.enums.TechnicianAvailability;
 import com.maintenance.infrastructure.queue.LocalMessageQueue;
+import com.maintenance.infrastructure.queue.TransactionAwareEventPublisher;
 import com.maintenance.mapper.DispatchRecordMapper;
 import com.maintenance.mapper.EquipmentMapper;
 import com.maintenance.mapper.FaultMapper;
@@ -47,6 +48,7 @@ class WorkOrderServiceTest {
     @Mock private SparePartService sparePartService;
     @Mock private DowntimeService downtimeService;
     @Mock private LocalMessageQueue messageQueue;
+    @Mock private TransactionAwareEventPublisher txPublisher;
     @Mock private AuditService auditService;
     @Mock private PredictiveDispatchService predictiveDispatchService;
     @Mock private SlaService slaService;
@@ -58,7 +60,7 @@ class WorkOrderServiceTest {
         workOrderService = new WorkOrderService(
                 workOrderMapper, dispatchRecordMapper, faultMapper, equipmentMapper,
                 technicianService, sparePartService, downtimeService,
-                messageQueue, auditService, predictiveDispatchService, slaService);
+                messageQueue, txPublisher, auditService, predictiveDispatchService, slaService);
     }
 
     private WorkOrder createWorkOrder(Long id, String status, Long techId, Long equipId, Long faultId) {

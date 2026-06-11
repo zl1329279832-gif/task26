@@ -4,6 +4,7 @@ import com.maintenance.common.BusinessException;
 import com.maintenance.entity.SlaRecord;
 import com.maintenance.enums.EventType;
 import com.maintenance.infrastructure.queue.LocalMessageQueue;
+import com.maintenance.infrastructure.queue.TransactionAwareEventPublisher;
 import com.maintenance.mapper.SlaRecordMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -23,13 +24,16 @@ public class SlaService {
 
     private final SlaRecordMapper slaRecordMapper;
     private final LocalMessageQueue messageQueue;
+    private final TransactionAwareEventPublisher txPublisher;
     private final AuditService auditService;
 
     public SlaService(SlaRecordMapper slaRecordMapper,
                       LocalMessageQueue messageQueue,
+                      TransactionAwareEventPublisher txPublisher,
                       AuditService auditService) {
         this.slaRecordMapper = slaRecordMapper;
         this.messageQueue = messageQueue;
+        this.txPublisher = txPublisher;
         this.auditService = auditService;
     }
 
@@ -38,7 +42,7 @@ public class SlaService {
      */
     @Transactional
     public SlaRecord createSlaRecord(Long workOrderId, int faultLevel) {
-        // Check if SLA record already exists
+        // Check if SLA record already exists (idempotent)
         SlaRecord existing = slaRecordMapper.selectByWorkOrderId(workOrderId);
         if (existing != null) {
             log.warn("SLA record already exists for workOrder [{}]", workOrderId);
@@ -67,13 +71,35 @@ public class SlaService {
 
     /**
      * Pause SLA: save remaining time and mark as PAUSED.
+     * <p>
+     * Fix: State guard — if already PAUSED, return existing record (idempotent).
+     * If already MET or EXPIRED, throw BusinessException.
      */
     @Transactional
     public SlaRecord pauseSla(Long workOrderId, String reason) {
-        SlaRecord record = slaRecordMapper.selectActiveByWorkOrder(workOrderId);
+        SlaRecord record = slaRecordMapper.selectByWorkOrderId(workOrderId);
         if (record == null) {
-            log.warn("No active SLA record found for workOrder [{}], cannot pause", workOrderId);
+            log.warn("No SLA record found for workOrder [{}], cannot pause", workOrderId);
             return null;
+        }
+
+        // IDEMPOTENCY: already paused
+        if ("PAUSED".equals(record.getStatus())) {
+            log.info("Idempotent pause: SLA for workOrder [{}] already PAUSED, remaining={}min",
+                    workOrderId, record.getRemainingMinutes());
+            return record;
+        }
+
+        // State guard: cannot pause finalized SLA
+        if ("MET".equals(record.getStatus()) || "EXPIRED".equals(record.getStatus())) {
+            log.warn("Cannot pause finalized SLA for workOrder [{}], status={}", workOrderId, record.getStatus());
+            return record;
+        }
+
+        if (!"ACTIVE".equals(record.getStatus())) {
+            log.warn("SLA for workOrder [{}] is in unexpected status={}, skipping pause",
+                    workOrderId, record.getStatus());
+            return record;
         }
 
         // Calculate remaining minutes
@@ -94,12 +120,12 @@ public class SlaService {
         log.info("SLA paused for workOrder [{}], remaining={}min, reason={}",
                 workOrderId, remainingMinutes, reason);
 
-        // Publish event
+        // Publish event (deferred until after commit)
         Map<String, Object> payload = new HashMap<>();
         payload.put("workOrderId", workOrderId);
         payload.put("remainingMinutes", remainingMinutes);
         payload.put("reason", reason);
-        messageQueue.publish(EventType.SLA_PAUSED.name(), payload);
+        txPublisher.publish(EventType.SLA_PAUSED.name(), payload);
 
         auditService.log("SLA", "PAUSE", "WorkOrder", workOrderId, "SYSTEM",
                 "SLA paused: remaining=" + remainingMinutes + "min, reason=" + reason);
@@ -109,6 +135,9 @@ public class SlaService {
 
     /**
      * Resume SLA: recalculate deadline from remaining time.
+     * <p>
+     * Fix: State guard — if already ACTIVE, return existing record (idempotent).
+     * If not PAUSED, skip.
      */
     @Transactional
     public SlaRecord resumeSla(Long workOrderId) {
@@ -116,6 +145,12 @@ public class SlaService {
         if (record == null) {
             log.warn("No SLA record found for workOrder [{}], cannot resume", workOrderId);
             return null;
+        }
+
+        // IDEMPOTENCY: already active
+        if ("ACTIVE".equals(record.getStatus())) {
+            log.info("Idempotent resume: SLA for workOrder [{}] already ACTIVE", workOrderId);
+            return record;
         }
 
         if (!"PAUSED".equals(record.getStatus())) {
@@ -137,12 +172,12 @@ public class SlaService {
         log.info("SLA resumed for workOrder [{}], new deadline={}, remaining={}min",
                 workOrderId, newDeadline, remainingMinutes);
 
-        // Publish event
+        // Publish event (deferred until after commit)
         Map<String, Object> payload = new HashMap<>();
         payload.put("workOrderId", workOrderId);
         payload.put("newDeadline", newDeadline.toString());
         payload.put("remainingMinutes", remainingMinutes);
-        messageQueue.publish(EventType.SLA_RESUMED.name(), payload);
+        txPublisher.publish(EventType.SLA_RESUMED.name(), payload);
 
         auditService.log("SLA", "RESUME", "WorkOrder", workOrderId, "SYSTEM",
                 "SLA resumed: newDeadline=" + newDeadline + ", remaining=" + remainingMinutes + "min");
@@ -219,7 +254,7 @@ public class SlaService {
 
         double ratio = (double) remainingMinutes / totalMinutes;
         if (ratio <= 0.1) {
-            return 15; // Less than 10% remaining
+            return 15;
         } else if (ratio <= 0.25) {
             return 12;
         } else if (ratio <= 0.5) {
@@ -238,6 +273,6 @@ public class SlaService {
         if (faultLevel >= 1 && faultLevel <= 4) {
             return SLA_MINUTES_BY_LEVEL[faultLevel];
         }
-        return SLA_MINUTES_BY_LEVEL[1]; // Default to L1
+        return SLA_MINUTES_BY_LEVEL[1];
     }
 }

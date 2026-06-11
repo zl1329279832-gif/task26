@@ -11,6 +11,7 @@ import com.maintenance.enums.EventType;
 import com.maintenance.enums.TechnicianAvailability;
 import com.maintenance.enums.WorkOrderStatus;
 import com.maintenance.infrastructure.queue.LocalMessageQueue;
+import com.maintenance.infrastructure.queue.TransactionAwareEventPublisher;
 import com.maintenance.mapper.DispatchRecordMapper;
 import com.maintenance.mapper.TechnicianMapper;
 import com.maintenance.mapper.TechnicianSkillMapper;
@@ -38,6 +39,7 @@ public class AutoDispatchService {
     private final WorkOrderMapper workOrderMapper;
     private final DispatchRecordMapper dispatchRecordMapper;
     private final LocalMessageQueue messageQueue;
+    private final TransactionAwareEventPublisher txPublisher;
     private final AuditService auditService;
     private final TechnicianService technicianService;
     private final MaintenanceWebSocketHandler webSocketHandler;
@@ -47,6 +49,7 @@ public class AutoDispatchService {
                                WorkOrderMapper workOrderMapper,
                                DispatchRecordMapper dispatchRecordMapper,
                                LocalMessageQueue messageQueue,
+                               TransactionAwareEventPublisher txPublisher,
                                AuditService auditService,
                                TechnicianService technicianService,
                                MaintenanceWebSocketHandler webSocketHandler) {
@@ -55,6 +58,7 @@ public class AutoDispatchService {
         this.workOrderMapper = workOrderMapper;
         this.dispatchRecordMapper = dispatchRecordMapper;
         this.messageQueue = messageQueue;
+        this.txPublisher = txPublisher;
         this.auditService = auditService;
         this.technicianService = technicianService;
         this.webSocketHandler = webSocketHandler;
@@ -189,7 +193,7 @@ public class AutoDispatchService {
         eventPayload.put("technicianName", selectedTech.getName());
         eventPayload.put("dispatchScore", best.score());
         eventPayload.put("dispatchType", DispatchType.AUTO.name());
-        messageQueue.publish(EventType.DISPATCH_DONE.name(), eventPayload);
+        txPublisher.publish(EventType.DISPATCH_DONE.name(), eventPayload);
 
         // 10. Audit log
         auditService.log("DISPATCH", "AUTO_DISPATCH", "WorkOrder", workOrder.getId(), "SYSTEM",
@@ -271,7 +275,7 @@ public class AutoDispatchService {
         preemptPayload.put("preemptedWorkOrderId", preemptedOrder.getId());
         preemptPayload.put("preemptedEquipmentId", preemptedOrder.getEquipmentId());
         preemptPayload.put("reason", "Emergency preemption by workOrder " + workOrder.getId());
-        messageQueue.publish(EventType.WORK_ORDER_REASSIGNED.name(), preemptPayload);
+        txPublisher.publish(EventType.WORK_ORDER_REASSIGNED.name(), preemptPayload);
 
         // 6. Assign the emergency order to the freed technician
         DispatchRecord dispatchRecord = new DispatchRecord();
@@ -298,7 +302,7 @@ public class AutoDispatchService {
         eventPayload.put("technicianId", preemptedTech.getId());
         eventPayload.put("technicianName", preemptedTech.getName());
         eventPayload.put("reason", "Emergency order preemption");
-        messageQueue.publish(EventType.EMERGENCY_ALERT.name(), eventPayload);
+        txPublisher.publish(EventType.EMERGENCY_ALERT.name(), eventPayload);
 
         // 9. Audit log
         auditService.log("DISPATCH", "EMERGENCY_DISPATCH", "WorkOrder", workOrder.getId(), "SYSTEM",

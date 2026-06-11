@@ -16,6 +16,7 @@ import com.maintenance.enums.EventType;
 import com.maintenance.enums.FaultStatus;
 import com.maintenance.enums.WorkOrderStatus;
 import com.maintenance.infrastructure.queue.LocalMessageQueue;
+import com.maintenance.infrastructure.queue.TransactionAwareEventPublisher;
 import com.maintenance.mapper.EquipmentMapper;
 import com.maintenance.mapper.FaultMapper;
 import com.maintenance.mapper.SparePartMapper;
@@ -44,6 +45,7 @@ public class FaultService {
     private final WorkOrderMapper workOrderMapper;
     private final SparePartMapper sparePartMapper;
     private final LocalMessageQueue messageQueue;
+    private final TransactionAwareEventPublisher txPublisher;
     private final AutoDispatchService autoDispatchService;
     private final AuditService auditService;
     private final DowntimeService downtimeService;
@@ -55,6 +57,7 @@ public class FaultService {
                         WorkOrderMapper workOrderMapper,
                         SparePartMapper sparePartMapper,
                         LocalMessageQueue messageQueue,
+                        TransactionAwareEventPublisher txPublisher,
                         AutoDispatchService autoDispatchService,
                         AuditService auditService,
                         DowntimeService downtimeService,
@@ -65,6 +68,7 @@ public class FaultService {
         this.workOrderMapper = workOrderMapper;
         this.sparePartMapper = sparePartMapper;
         this.messageQueue = messageQueue;
+        this.txPublisher = txPublisher;
         this.autoDispatchService = autoDispatchService;
         this.auditService = auditService;
         this.downtimeService = downtimeService;
@@ -236,7 +240,7 @@ public class FaultService {
         eventPayload.put("slaDeadline", slaRecord != null ? slaRecord.getSlaDeadline().toString() : null);
         eventPayload.put("purchaseSuggestionCount",
                 preOccupyResult.getShortageParts() != null ? preOccupyResult.getShortageParts().size() : 0);
-        messageQueue.publish(EventType.FAULT_REPORTED.name(), eventPayload);
+        txPublisher.publish(EventType.FAULT_REPORTED.name(), eventPayload);
 
         // 10. Audit log
         auditService.log("FAULT", "REPORT", "Fault", fault.getId(), request.getReporter(),

@@ -15,6 +15,7 @@ import com.maintenance.entity.Technician;
 import com.maintenance.entity.TechnicianSkill;
 import com.maintenance.entity.WorkOrder;
 import com.maintenance.infrastructure.queue.LocalMessageQueue;
+import com.maintenance.infrastructure.queue.TransactionAwareEventPublisher;
 import com.maintenance.mapper.DispatchPlanMapper;
 import com.maintenance.mapper.DispatchRecordMapper;
 import com.maintenance.mapper.FaultMapper;
@@ -64,6 +65,7 @@ class PredictiveDispatchServiceTest {
     @Mock private SparePartMapper sparePartMapper;
     @Mock private PurchaseSuggestionMapper purchaseSuggestionMapper;
     @Mock private LocalMessageQueue messageQueue;
+    @Mock private TransactionAwareEventPublisher txPublisher;
     @Mock private AuditService auditService;
     @Mock private TechnicianService technicianService;
     @Mock private SparePartService sparePartService;
@@ -78,7 +80,7 @@ class PredictiveDispatchServiceTest {
                 technicianMapper, technicianSkillMapper, workOrderMapper,
                 dispatchRecordMapper, dispatchPlanMapper, faultMapper,
                 sparePartMapper, purchaseSuggestionMapper, messageQueue,
-                auditService, technicianService, sparePartService,
+                txPublisher, auditService, technicianService, sparePartService,
                 slaService, webSocketHandler);
     }
 
@@ -182,7 +184,7 @@ class PredictiveDispatchServiceTest {
         }
 
         // Event should be published
-        verify(messageQueue).publish(eq("DISPATCH_PLANS_GENERATED"), any());
+        verify(txPublisher).publish(eq("DISPATCH_PLANS_GENERATED"), any());
     }
 
     // ========================================================
@@ -236,7 +238,7 @@ class PredictiveDispatchServiceTest {
         assertTrue(result.isAllPartsAvailable(), "All parts should be available");
         assertEquals(1, result.getOccupiedParts().size());
         assertTrue(result.getShortageParts().isEmpty());
-        verify(messageQueue).publish(eq("PARTS_PRE_OCCUPIED"), any());
+        verify(txPublisher).publish(eq("PARTS_PRE_OCCUPIED"), any());
     }
 
     // ========================================================
@@ -264,7 +266,7 @@ class PredictiveDispatchServiceTest {
         assertFalse(result.isAllPartsAvailable(), "Parts should not all be available");
         assertEquals(1, result.getShortageParts().size());
         assertEquals("P001", result.getShortageParts().get(0).getPartCode());
-        verify(messageQueue).publish(eq("PURCHASE_SUGGESTED"), any());
+        verify(txPublisher).publish(eq("PURCHASE_SUGGESTED"), any());
     }
 
     // ========================================================
@@ -286,9 +288,10 @@ class PredictiveDispatchServiceTest {
 
         when(dispatchPlanMapper.selectByWorkOrderId(1L)).thenReturn(List.of(plan));
         when(technicianService.getById(100L)).thenReturn(tech);
+        when(workOrderMapper.selectById(1L)).thenReturn(wo);
+        when(dispatchRecordMapper.selectLatestByWorkOrder(1L)).thenReturn(null);
         when(dispatchPlanMapper.clearSelected(1L)).thenReturn(1);
         when(dispatchPlanMapper.updateSelected(1L)).thenReturn(1);
-        when(workOrderMapper.selectById(1L)).thenReturn(wo);
         when(dispatchRecordMapper.insert(any(DispatchRecord.class))).thenReturn(1);
         when(workOrderMapper.updateById(any())).thenReturn(1);
 
@@ -298,7 +301,7 @@ class PredictiveDispatchServiceTest {
         assertEquals(100L, result.getTechnicianId());
         verify(technicianService).incrementWorkload(100L);
         verify(dispatchPlanMapper).updateSelected(1L);
-        verify(messageQueue).publish(eq("DISPATCH_DONE"), any());
+        verify(txPublisher).publish(eq("DISPATCH_DONE"), any());
     }
 
     // ========================================================
@@ -315,7 +318,10 @@ class PredictiveDispatchServiceTest {
         plan.setTotalScore(BigDecimal.valueOf(85));
 
         Technician tech = createTechnician(100L, "OFFLINE", 0);
+        WorkOrder wo = createWorkOrder(1L);
 
+        when(workOrderMapper.selectById(1L)).thenReturn(wo);
+        when(dispatchRecordMapper.selectLatestByWorkOrder(1L)).thenReturn(null);
         when(dispatchPlanMapper.selectByWorkOrderId(1L)).thenReturn(List.of(plan));
         when(technicianService.getById(100L)).thenReturn(tech);
 
@@ -334,7 +340,7 @@ class PredictiveDispatchServiceTest {
         service.releasePreOccupiedParts(1L);
 
         verify(sparePartService).releaseOccupationsByWorkOrder(1L);
-        verify(messageQueue).publish(eq("PARTS_PRE_RELEASED"), any());
+        verify(txPublisher).publish(eq("PARTS_PRE_RELEASED"), any());
     }
 
     // ========================================================
@@ -402,6 +408,9 @@ class PredictiveDispatchServiceTest {
     @Test
     @DisplayName("Select non-existent plan throws BusinessException")
     void selectAndExecutePlan_planNotFound() {
+        WorkOrder wo = createWorkOrder(1L);
+        when(workOrderMapper.selectById(1L)).thenReturn(wo);
+        when(dispatchRecordMapper.selectLatestByWorkOrder(1L)).thenReturn(null);
         when(dispatchPlanMapper.selectByWorkOrderId(1L)).thenReturn(Collections.emptyList());
 
         assertThrows(BusinessException.class, () -> service.selectAndExecutePlan(1L, 99));

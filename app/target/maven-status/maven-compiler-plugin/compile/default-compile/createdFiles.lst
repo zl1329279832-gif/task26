@@ -38,13 +38,16 @@ com\maintenance\mapper\FaultMapper.class
 com\maintenance\controller\WorkOrderController.class
 com\maintenance\enums\OccupationStatus.class
 com\maintenance\dto\DispatchPlanResult$DispatchPlanResultBuilder.class
+com\maintenance\infrastructure\queue\TransactionAwareEventPublisher.class
 com\maintenance\config\WebSocketConfig.class
+com\maintenance\infrastructure\queue\TransactionAwareEventPublisher$1.class
 com\maintenance\consumer\PredictiveDispatchConsumer.class
 com\maintenance\dto\PreOccupyResult.class
 com\maintenance\enums\WorkOrderStatus.class
 com\maintenance\consumer\StatusChangeConsumer.class
 com\maintenance\entity\SlaRecord.class
 com\maintenance\enums\EventType.class
+com\maintenance\infrastructure\queue\TransactionAwareEventPublisher$2.class
 com\maintenance\MaintenanceApplication.class
 com\maintenance\enums\WorkOrderStatus$1.class
 com\maintenance\entity\SparePart.class

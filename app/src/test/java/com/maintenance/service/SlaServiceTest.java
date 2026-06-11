@@ -2,6 +2,7 @@ package com.maintenance.service;
 
 import com.maintenance.entity.SlaRecord;
 import com.maintenance.infrastructure.queue.LocalMessageQueue;
+import com.maintenance.infrastructure.queue.TransactionAwareEventPublisher;
 import com.maintenance.mapper.SlaRecordMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -30,13 +31,14 @@ class SlaServiceTest {
 
     @Mock private SlaRecordMapper slaRecordMapper;
     @Mock private LocalMessageQueue messageQueue;
+    @Mock private TransactionAwareEventPublisher txPublisher;
     @Mock private AuditService auditService;
 
     private SlaService slaService;
 
     @BeforeEach
     void setUp() {
-        slaService = new SlaService(slaRecordMapper, messageQueue, auditService);
+        slaService = new SlaService(slaRecordMapper, messageQueue, txPublisher, auditService);
     }
 
     // ========================================================
@@ -103,7 +105,7 @@ class SlaServiceTest {
         activeRecord.setStatus("ACTIVE");
         activeRecord.setSlaDeadline(LocalDateTime.now().plusMinutes(100));
 
-        when(slaRecordMapper.selectActiveByWorkOrder(1L)).thenReturn(activeRecord);
+        when(slaRecordMapper.selectByWorkOrderId(1L)).thenReturn(activeRecord);
         when(slaRecordMapper.updateSla(eq(1L), eq("PAUSED"), anyInt(), any(), isNull(), any())).thenReturn(1);
 
         SlaRecord result = slaService.pauseSla(1L, "waiting for parts");
@@ -111,16 +113,16 @@ class SlaServiceTest {
         assertEquals("PAUSED", result.getStatus());
         assertNotNull(result.getPauseReason());
         assertTrue(result.getPauseReason().contains("waiting for parts"));
-        verify(messageQueue).publish(eq("SLA_PAUSED"), any());
+        verify(txPublisher).publish(eq("SLA_PAUSED"), any());
     }
 
     // ========================================================
     // TEST: SLA pause returns null when no active record
     // ========================================================
     @Test
-    @DisplayName("SLA pause returns null when no active SLA record")
+    @DisplayName("SLA pause returns null when no SLA record exists")
     void pauseSla_noActiveRecord() {
-        when(slaRecordMapper.selectActiveByWorkOrder(99L)).thenReturn(null);
+        when(slaRecordMapper.selectByWorkOrderId(99L)).thenReturn(null);
 
         SlaRecord result = slaService.pauseSla(99L, "no record");
 
@@ -151,7 +153,7 @@ class SlaServiceTest {
         // New deadline should be ~60 minutes from now
         assertTrue(result.getSlaDeadline().isAfter(LocalDateTime.now().plusMinutes(55)));
         assertTrue(result.getSlaDeadline().isBefore(LocalDateTime.now().plusMinutes(65)));
-        verify(messageQueue).publish(eq("SLA_RESUMED"), any());
+        verify(txPublisher).publish(eq("SLA_RESUMED"), any());
     }
 
     // ========================================================

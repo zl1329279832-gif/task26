@@ -44,6 +44,7 @@ C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenanc
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\entity\SparePartOccupation.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\infrastructure\queue\LocalMessageQueue.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\service\SlaService.java
+C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\infrastructure\queue\TransactionAwareEventPublisher.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\infrastructure\queue\MaintenanceEvent.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\config\RedisConfig.java
 C:\Users\13292\Desktop\claudel1\reposNew\task26\app\src\main\java\com\maintenance\mapper\WorkOrderMapper.java

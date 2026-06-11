@@ -20,6 +20,7 @@ import com.maintenance.enums.EventType;
 import com.maintenance.enums.TechnicianAvailability;
 import com.maintenance.enums.WorkOrderStatus;
 import com.maintenance.infrastructure.queue.LocalMessageQueue;
+import com.maintenance.infrastructure.queue.TransactionAwareEventPublisher;
 import com.maintenance.mapper.DispatchPlanMapper;
 import com.maintenance.mapper.DispatchRecordMapper;
 import com.maintenance.mapper.FaultMapper;
@@ -56,6 +57,7 @@ public class PredictiveDispatchService {
     private final SparePartMapper sparePartMapper;
     private final PurchaseSuggestionMapper purchaseSuggestionMapper;
     private final LocalMessageQueue messageQueue;
+    private final TransactionAwareEventPublisher txPublisher;
     private final AuditService auditService;
     private final TechnicianService technicianService;
     private final SparePartService sparePartService;
@@ -71,6 +73,7 @@ public class PredictiveDispatchService {
                                      SparePartMapper sparePartMapper,
                                      PurchaseSuggestionMapper purchaseSuggestionMapper,
                                      LocalMessageQueue messageQueue,
+                                     TransactionAwareEventPublisher txPublisher,
                                      AuditService auditService,
                                      TechnicianService technicianService,
                                      @Lazy SparePartService sparePartService,
@@ -85,6 +88,7 @@ public class PredictiveDispatchService {
         this.sparePartMapper = sparePartMapper;
         this.purchaseSuggestionMapper = purchaseSuggestionMapper;
         this.messageQueue = messageQueue;
+        this.txPublisher = txPublisher;
         this.auditService = auditService;
         this.technicianService = technicianService;
         this.sparePartService = sparePartService;
@@ -200,13 +204,13 @@ public class PredictiveDispatchService {
                 plans.size(), workOrder.getId(),
                 plans.isEmpty() ? "N/A" : plans.get(0).getTotalScore());
 
-        // Publish event
+        // Publish event (deferred until after commit)
         Map<String, Object> payload = new HashMap<>();
         payload.put("workOrderId", workOrder.getId());
         payload.put("faultId", fault.getId());
         payload.put("planCount", plans.size());
         payload.put("recommendedPlanIndex", plans.isEmpty() ? null : plans.get(0).getPlanIndex());
-        messageQueue.publish(EventType.DISPATCH_PLANS_GENERATED.name(), payload);
+        txPublisher.publish(EventType.DISPATCH_PLANS_GENERATED.name(), payload);
 
         auditService.log("DISPATCH", "GENERATE_PLANS", "WorkOrder", workOrder.getId(), "SYSTEM",
                 "Generated " + plans.size() + " dispatch plans, best score="
@@ -238,10 +242,7 @@ public class PredictiveDispatchService {
         boolean isEmergency = faultLevel >= 3;
 
         // Query fault history for this equipment type to determine frequency
-        // Use a large time window (30 days) to detect high-frequency equipment
         List<Fault> recentFaults = faultMapper.selectRecentByEquipment(
-                // We need equipmentId, but we only have workOrderId here.
-                // Use workOrderId to look up the work order and get equipmentId.
                 workOrderMapper.selectById(workOrderId).getEquipmentId(),
                 30 * 24 * 60);
         boolean highFrequency = recentFaults != null && recentFaults.size() >= 3;
@@ -251,7 +252,6 @@ public class PredictiveDispatchService {
             int minStock = part.getMinStock() != null ? part.getMinStock() : 0;
 
             if (stock == 0) {
-                // Part out of stock - generate purchase suggestion
                 PurchaseSuggestion suggestion = generatePurchaseSuggestion(
                         workOrderId, part, 1, 0);
                 shortageParts.add(suggestion);
@@ -260,9 +260,6 @@ public class PredictiveDispatchService {
                 continue;
             }
 
-            // Pre-occupy logic:
-            // - Emergency or high-frequency: occupy if stock > 0
-            // - Normal: occupy if stock > minStock (safe to reserve)
             boolean shouldOccupy = (isEmergency || highFrequency) || (stock > minStock);
 
             if (shouldOccupy) {
@@ -275,7 +272,6 @@ public class PredictiveDispatchService {
                 } catch (BusinessException e) {
                     log.warn("Failed to pre-occupy part [{}] for workOrder [{}]: {}",
                             part.getPartCode(), workOrderId, e.getMessage());
-                    // Create purchase suggestion for failed occupation
                     PurchaseSuggestion suggestion = generatePurchaseSuggestion(
                             workOrderId, part, 1, stock);
                     shortageParts.add(suggestion);
@@ -285,13 +281,13 @@ public class PredictiveDispatchService {
 
         boolean allAvailable = shortageParts.isEmpty();
 
-        // Publish pre-occupation event
+        // Publish pre-occupation event (deferred until after commit)
         Map<String, Object> payload = new HashMap<>();
         payload.put("workOrderId", workOrderId);
         payload.put("occupiedCount", occupiedParts.size());
         payload.put("shortageCount", shortageParts.size());
         payload.put("allPartsAvailable", allAvailable);
-        messageQueue.publish(EventType.PARTS_PRE_OCCUPIED.name(), payload);
+        txPublisher.publish(EventType.PARTS_PRE_OCCUPIED.name(), payload);
 
         auditService.log("SPARE_PART", "PRE_OCCUPY", "WorkOrder", workOrderId, "SYSTEM",
                 "Pre-occupied " + occupiedParts.size() + " parts, "
@@ -316,7 +312,7 @@ public class PredictiveDispatchService {
 
             Map<String, Object> payload = new HashMap<>();
             payload.put("workOrderId", workOrderId);
-            messageQueue.publish(EventType.PARTS_PRE_RELEASED.name(), payload);
+            txPublisher.publish(EventType.PARTS_PRE_RELEASED.name(), payload);
         } catch (BusinessException e) {
             log.error("Failed to release pre-occupied parts for workOrder [{}]: {}",
                     workOrderId, e.getMessage());
@@ -325,9 +321,30 @@ public class PredictiveDispatchService {
 
     /**
      * Select and execute a specific dispatch plan.
+     * <p>
+     * Fix: Idempotency guard — if a dispatch record with type=AUTO already exists
+     * for this work order and the work order already has a technicianId assigned,
+     * return a success result based on the existing record instead of creating a duplicate.
      */
     @Transactional
     public DispatchResult selectAndExecutePlan(Long workOrderId, int planIndex) {
+        // IDEMPOTENCY: check if already dispatched
+        WorkOrder existingOrder = workOrderMapper.selectById(workOrderId);
+        if (existingOrder == null) {
+            throw new BusinessException("Work order not found: " + workOrderId);
+        }
+        DispatchRecord existingRecord = dispatchRecordMapper.selectLatestByWorkOrder(workOrderId);
+        if (existingRecord != null && existingOrder.getTechnicianId() != null
+                && DispatchType.AUTO.name().equals(existingRecord.getDispatchType())) {
+            Technician existingTech = technicianService.getById(existingOrder.getTechnicianId());
+            String techName = existingTech != null ? existingTech.getName() : "Unknown";
+            log.info("Idempotent dispatch: workOrder {} already dispatched to technician {} (recordId={})",
+                    workOrderId, existingOrder.getTechnicianId(), existingRecord.getId());
+            return DispatchResult.success(workOrderId, existingOrder.getOrderCode(),
+                    existingOrder.getTechnicianId(), techName,
+                    existingRecord.getDispatchScore(), DispatchType.AUTO.name());
+        }
+
         List<DispatchPlan> plans = dispatchPlanMapper.selectByWorkOrderId(workOrderId);
         DispatchPlan selectedPlan = null;
         for (DispatchPlan plan : plans) {
@@ -359,11 +376,7 @@ public class PredictiveDispatchService {
         dispatchPlanMapper.clearSelected(workOrderId);
         dispatchPlanMapper.updateSelected(selectedPlan.getId());
 
-        // Load work order
         WorkOrder workOrder = workOrderMapper.selectById(workOrderId);
-        if (workOrder == null) {
-            throw new BusinessException("Work order not found: " + workOrderId);
-        }
 
         // Create dispatch record
         DispatchRecord record = new DispatchRecord();
@@ -383,7 +396,7 @@ public class PredictiveDispatchService {
         // Update technician workload
         technicianService.incrementWorkload(selectedPlan.getTechnicianId());
 
-        // Publish DISPATCH_DONE event
+        // Publish DISPATCH_DONE event (deferred until after commit)
         Map<String, Object> payload = new HashMap<>();
         payload.put("workOrderId", workOrderId);
         payload.put("orderCode", workOrder.getOrderCode());
@@ -392,7 +405,7 @@ public class PredictiveDispatchService {
         payload.put("dispatchScore", selectedPlan.getTotalScore());
         payload.put("dispatchType", DispatchType.AUTO.name());
         payload.put("planIndex", planIndex);
-        messageQueue.publish(EventType.DISPATCH_DONE.name(), payload);
+        txPublisher.publish(EventType.DISPATCH_DONE.name(), payload);
 
         auditService.log("DISPATCH", "EXECUTE_PLAN", "WorkOrder", workOrderId, "SYSTEM",
                 "Executed dispatch plan#" + planIndex + ": technician=" + tech.getName()
@@ -430,7 +443,7 @@ public class PredictiveDispatchService {
 
         purchaseSuggestionMapper.insert(suggestion);
 
-        // Publish event
+        // Publish event (deferred until after commit)
         Map<String, Object> payload = new HashMap<>();
         payload.put("workOrderId", workOrderId);
         payload.put("partId", part.getId());
@@ -438,7 +451,7 @@ public class PredictiveDispatchService {
         payload.put("partName", part.getPartName());
         payload.put("shortage", shortage);
         payload.put("urgency", suggestion.getUrgency());
-        messageQueue.publish(EventType.PURCHASE_SUGGESTED.name(), payload);
+        txPublisher.publish(EventType.PURCHASE_SUGGESTED.name(), payload);
 
         auditService.log("SPARE_PART", "PURCHASE_SUGGESTION", "WorkOrder", workOrderId, "SYSTEM",
                 "Purchase suggestion created: part=" + part.getPartCode()
@@ -463,10 +476,6 @@ public class PredictiveDispatchService {
 
     // ========== Scoring Methods ==========
 
-    /**
-     * Equipment fault history score (0-15 pts).
-     * More historical faults → higher urgency.
-     */
     private int calculateHistoryScore(Long equipmentId) {
         List<Fault> recentFaults = faultMapper.selectRecentByEquipment(equipmentId, 30 * 24 * 60);
         int count = recentFaults != null ? recentFaults.size() : 0;
@@ -485,7 +494,7 @@ public class PredictiveDispatchService {
     }
 
     private BigDecimal calculateSkillScore(TechnicianSkill skill) {
-        BigDecimal score = BigDecimal.valueOf(20); // Base for matching equipment type
+        BigDecimal score = BigDecimal.valueOf(20);
         int proficiencyBonus = Math.min(skill.getProficiency() * 2, 10);
         return score.add(BigDecimal.valueOf(proficiencyBonus));
     }
@@ -523,7 +532,7 @@ public class PredictiveDispatchService {
         if (completedCount >= 11) return BigDecimal.valueOf(20);
         if (completedCount >= 6) return BigDecimal.valueOf(15);
         if (completedCount >= 1) return BigDecimal.valueOf(10);
-        return BigDecimal.valueOf(15); // New tech gets moderate score
+        return BigDecimal.valueOf(15);
     }
 
     private double estimateRepairHours(int faultLevel) {

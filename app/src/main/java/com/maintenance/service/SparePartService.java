@@ -7,6 +7,7 @@ import com.maintenance.entity.SparePartOccupation;
 import com.maintenance.enums.EventType;
 import com.maintenance.enums.OccupationStatus;
 import com.maintenance.infrastructure.queue.LocalMessageQueue;
+import com.maintenance.infrastructure.queue.TransactionAwareEventPublisher;
 import com.maintenance.mapper.SparePartMapper;
 import com.maintenance.mapper.SparePartOccupationMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -33,23 +34,35 @@ public class SparePartService {
     private final SparePartOccupationMapper sparePartOccupationMapper;
     private final RedisTemplate<String, Object> redisTemplate;
     private final LocalMessageQueue messageQueue;
+    private final TransactionAwareEventPublisher txPublisher;
     private final AuditService auditService;
 
     public SparePartService(SparePartMapper sparePartMapper,
                             SparePartOccupationMapper sparePartOccupationMapper,
                             RedisTemplate<String, Object> redisTemplate,
                             LocalMessageQueue messageQueue,
+                            TransactionAwareEventPublisher txPublisher,
                             AuditService auditService) {
         this.sparePartMapper = sparePartMapper;
         this.sparePartOccupationMapper = sparePartOccupationMapper;
         this.redisTemplate = redisTemplate;
         this.messageQueue = messageQueue;
+        this.txPublisher = txPublisher;
         this.auditService = auditService;
     }
 
     /**
      * Occupy spare parts for a work order.
-     * Uses Redis distributed lock (SETNX with 10s expiry) to prevent concurrent stock issues.
+     * <p>
+     * Fixes:
+     * <ul>
+     *   <li>Uses Redis distributed lock (SETNX with 10s expiry) to prevent concurrent stock issues.</li>
+     *   <li><b>Idempotency guard</b>: before occupying, check if an OCCUPIED record already exists
+     *       for this (workOrderId, partId) pair. If so, return the existing record instead of
+     *       creating a duplicate occupation.</li>
+     *   <li>Events published via {@link TransactionAwareEventPublisher} so consumers only see
+     *       committed data.</li>
+     * </ul>
      */
     @Transactional
     public SparePartOccupation occupyPart(Long workOrderId, Long partId, int quantity) {
@@ -62,7 +75,20 @@ public class SparePartService {
                 throw new BusinessException("Failed to acquire part lock, partId=" + partId);
             }
 
-            // 2. Check stock availability
+            // 2. IDEMPOTENCY: check if already occupied for this (workOrderId, partId)
+            List<SparePartOccupation> existing = sparePartOccupationMapper
+                    .selectByWorkOrderAndStatus(workOrderId, OccupationStatus.OCCUPIED.name());
+            if (existing != null) {
+                for (SparePartOccupation occ : existing) {
+                    if (partId.equals(occ.getPartId()) && quantity == occ.getQuantity()) {
+                        log.info("Idempotent occupy: returning existing occupation id={} for workOrder={}, part={}",
+                                occ.getId(), workOrderId, partId);
+                        return occ;
+                    }
+                }
+            }
+
+            // 3. Check stock availability
             SparePart part = sparePartMapper.selectById(partId);
             if (part == null) {
                 throw new BusinessException("Spare part not found, partId=" + partId);
@@ -72,13 +98,13 @@ public class SparePartService {
                         + ", stock=" + part.getStockQuantity() + ", required=" + quantity);
             }
 
-            // 3. Decrease stock (SQL has stock_quantity >= quantity condition)
+            // 4. Decrease stock (SQL has stock_quantity >= quantity condition)
             int rows = sparePartMapper.decreaseStock(partId, quantity);
             if (rows == 0) {
                 throw new BusinessException("Stock decrease failed (concurrent conflict), partId=" + partId);
             }
 
-            // 4. Create occupation record (status=OCCUPIED)
+            // 5. Create occupation record (status=OCCUPIED)
             SparePartOccupation occupation = new SparePartOccupation();
             occupation.setWorkOrderId(workOrderId);
             occupation.setPartId(partId);
@@ -89,7 +115,7 @@ public class SparePartService {
             log.info("Spare part occupied: workOrder={}, part={}, qty={}, id={}",
                     workOrderId, partId, quantity, occupation.getId());
 
-            // 5. Publish PART_REQUESTED event
+            // 6. Publish PART_REQUESTED event (deferred until after commit)
             Map<String, Object> eventPayload = new HashMap<>();
             eventPayload.put("workOrderId", workOrderId);
             eventPayload.put("partId", partId);
@@ -97,15 +123,15 @@ public class SparePartService {
             eventPayload.put("partName", part.getPartName());
             eventPayload.put("quantity", quantity);
             eventPayload.put("occupationId", occupation.getId());
-            messageQueue.publish(EventType.PART_REQUESTED.name(), eventPayload);
+            txPublisher.publish(EventType.PART_REQUESTED.name(), eventPayload);
 
-            // 6. Audit log
+            // 7. Audit log
             auditService.log("SPARE_PART", "OCCUPY", "WorkOrder", workOrderId, "SYSTEM",
                     "Part occupied: partCode=" + part.getPartCode() + ", qty=" + quantity);
 
             return occupation;
         } finally {
-            // 7. Release lock in finally block
+            // 8. Release lock in finally block
             if (locked) {
                 unlock(lockKey);
             }
@@ -122,18 +148,24 @@ public class SparePartService {
             throw new BusinessException("Part occupation not found, id=" + occupationId);
         }
 
+        // IDEMPOTENCY: already consumed?
+        if (OccupationStatus.CONSUMED.name().equals(occupation.getStatus())) {
+            log.info("Idempotent consume: occupation {} already CONSUMED", occupationId);
+            return;
+        }
+
         // Update status to CONSUMED, set consumed_at
         sparePartOccupationMapper.updateStatus(occupationId, OccupationStatus.CONSUMED.name(), LocalDateTime.now());
         log.info("Spare part consumed: occupationId={}, workOrder={}, partId={}",
                 occupationId, occupation.getWorkOrderId(), occupation.getPartId());
 
-        // Publish PART_CONSUMED event
+        // Publish PART_CONSUMED event (deferred until after commit)
         Map<String, Object> eventPayload = new HashMap<>();
         eventPayload.put("occupationId", occupationId);
         eventPayload.put("workOrderId", occupation.getWorkOrderId());
         eventPayload.put("partId", occupation.getPartId());
         eventPayload.put("quantity", occupation.getQuantity());
-        messageQueue.publish(EventType.PART_CONSUMED.name(), eventPayload);
+        txPublisher.publish(EventType.PART_CONSUMED.name(), eventPayload);
 
         // Audit log
         auditService.log("SPARE_PART", "CONSUME", "WorkOrder", occupation.getWorkOrderId(), "SYSTEM",
@@ -143,10 +175,13 @@ public class SparePartService {
     /**
      * Release all OCCUPIED spare parts for a work order.
      * Returns occupied quantity back to stock for each part.
-     *
+     * <p>
      * Fix: Uses retry logic for lock acquisition instead of silently skipping.
      * If lock cannot be acquired after retries, throws BusinessException to trigger
      * transactional rollback (preventing partial release inconsistency).
+     * <p>
+     * Fix: Events are published via TransactionAwareEventPublisher so consumers
+     * only see committed state.
      */
     @Transactional
     public void releaseOccupationsByWorkOrder(Long workOrderId) {
@@ -163,11 +198,8 @@ public class SparePartService {
             String lockKey = PART_LOCK_PREFIX + occupation.getPartId();
             boolean locked = false;
             try {
-                // FIX: Retry lock acquisition instead of silently skipping
                 locked = tryLockWithRetry(lockKey, 10, LOCK_RETRY_MAX, LOCK_RETRY_DELAY_MS);
                 if (!locked) {
-                    // FIX: Throw exception instead of silently continuing
-                    // This triggers @Transactional rollback, keeping all state consistent
                     throw new BusinessException(
                             "Failed to acquire part lock after " + LOCK_RETRY_MAX
                                     + " retries, partId=" + occupation.getPartId()
@@ -183,13 +215,13 @@ public class SparePartService {
                 log.info("Spare part released: occupationId={}, partId={}, qty={}",
                         occupation.getId(), occupation.getPartId(), occupation.getQuantity());
 
-                // 5. Publish PART_RELEASED event
+                // 5. Publish PART_RELEASED event (deferred until after commit)
                 Map<String, Object> eventPayload = new HashMap<>();
                 eventPayload.put("occupationId", occupation.getId());
                 eventPayload.put("workOrderId", workOrderId);
                 eventPayload.put("partId", occupation.getPartId());
                 eventPayload.put("quantity", occupation.getQuantity());
-                messageQueue.publish(EventType.PART_RELEASED.name(), eventPayload);
+                txPublisher.publish(EventType.PART_RELEASED.name(), eventPayload);
             } finally {
                 if (locked) {
                     unlock(lockKey);
@@ -246,9 +278,8 @@ public class SparePartService {
         return sparePartMapper.selectById(id);
     }
 
-    /**
-     * Try to acquire a Redis distributed lock using SETNX.
-     */
+    // ========== Lock Helpers ==========
+
     private boolean tryLock(String key, long expireSeconds) {
         try {
             Boolean result = redisTemplate.opsForValue()
@@ -260,10 +291,6 @@ public class SparePartService {
         }
     }
 
-    /**
-     * Try to acquire a lock with retry logic.
-     * Retries up to maxRetries times with delayMs between attempts.
-     */
     private boolean tryLockWithRetry(String key, long expireSeconds, int maxRetries, long delayMs) {
         for (int attempt = 1; attempt <= maxRetries; attempt++) {
             if (tryLock(key, expireSeconds)) {
@@ -282,9 +309,6 @@ public class SparePartService {
         return false;
     }
 
-    /**
-     * Release a Redis distributed lock.
-     */
     private void unlock(String key) {
         try {
             redisTemplate.delete(key);
